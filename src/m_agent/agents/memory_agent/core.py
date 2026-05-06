@@ -162,6 +162,10 @@ class MemoryAgent(
         if not isinstance(workspace_cfg, dict):
             workspace_cfg = {}
         self.enable_state_machine = bool(workspace_cfg.get("enable_state_machine", True))
+        _judge_mode = str(workspace_cfg.get("judge_mode", "evidence") or "evidence").strip().lower()
+        # "evidence" (default): judge outputs status/useful_evidence_ids/next_query and drives pruning.
+        # "direct": judge outputs useful_information + (answer XOR next_query); no evidence binding/pruning.
+        self.workspace_judge_mode = _judge_mode if _judge_mode in {"evidence", "direct"} else "evidence"
         self.workspace_max_rounds = max(1, int(workspace_cfg.get("max_rounds", 2)))
         self.workspace_max_actions_per_round = max(1, int(workspace_cfg.get("max_actions_per_round", 4)))
         self.workspace_max_episode_candidates = max(1, int(workspace_cfg.get("max_episode_candidates", 12)))

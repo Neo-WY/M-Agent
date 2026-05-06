@@ -179,6 +179,7 @@ def execute_actions(
     search_entity_profile: Callable[..., Dict[str, Any]] | None = None,
     search_entity_status: Callable[..., Dict[str, Any]] | None = None,
     max_episode_candidates: int,
+    forced_detail_topk: int = 5,
     entity_workspace_mode: str = "default",
     entity_eplus_min_slot_score: float = 0.44,
     entity_eplus_suppress_empty_profile_query: bool = True,
@@ -190,6 +191,7 @@ def execute_actions(
     time_documents: List[WorkspaceDocument] = []
     eplus = str(entity_workspace_mode or "default").strip().lower() == "eplus"
     eplus_slot_min = float(entity_eplus_min_slot_score or 0.44)
+    fixed_detail_topk = max(1, int(forced_detail_topk))
 
     for action in actions:
         action_type = str(action.get("action_type", "")).strip()
@@ -200,8 +202,8 @@ def execute_actions(
 
         if action_type == ACTION_EVENT_DETAIL_RECALL:
             detail_query = str(query.get("detail_query", "")).strip()
-            topk = max(1, int(query.get("topk", 5)))
-            result = search_details(detail_query, topk)
+            # Hard rule: episodic detail topk is fixed by agent config, not planner params.
+            result = search_details(detail_query, fixed_detail_topk)
             action_results.append({"action_id": action_id, "action_type": action_type, "result": result})
             _merge_ref_scores(
                 ref_scores,
@@ -214,8 +216,8 @@ def execute_actions(
 
         if action_type in (ACTION_EVENT_DETAIL_MULTI_ROUTE_RECALL, ACTION_RECALL_REMEDY_MULTI_ROUTE):
             detail_query = str(query.get("detail_query", "")).strip()
-            topk = max(1, int(query.get("topk", 5)))
-            result = search_details_multi_route(detail_query, topk)
+            # Hard rule: episodic detail topk is fixed by agent config, not planner params.
+            result = search_details_multi_route(detail_query, fixed_detail_topk)
             action_results.append({"action_id": action_id, "action_type": action_type, "result": result})
             _merge_ref_scores(
                 ref_scores,

@@ -116,6 +116,146 @@ memory_agent:
         INSUFFICIENT with a targeted next_query. If one purchase is split across snippets, do
         not drop the snippet that only states the count or only the total.
 
+  workspace_direct_judge_prompt:
+    zh: |
+      你是记忆问答系统的“Judge 驱动”检索控制器。
+      你不需要输出 SUFFICIENT/INSUFFICIENT/INVALID，也不需要绑定证据 ID。
+      你的任务是：根据【原始问题】与【当前工作区证据】总结当前已知的关键信息，并决定：
+      - 现在是否已经足以回答问题：若足够，直接给出 answer；
+      - 若仍不足，给出下一轮检索的 next_query。
+
+      【原始问题】
+      <original_question>
+
+      【当前检索查询】
+      <cur_query>
+
+      【Useful Information So Far｜direct 模式跨轮累积（若非「尚无」，须与下方证据核对并在 useful_information 中合并更新）】
+      <useful_information_so_far>
+
+      【工作区证据（全部保留项，仅供你阅读，不要求引用证据编号）】
+      <workspace_evidence_summary>
+
+      仅返回 JSON：
+      {
+        "useful_information": "在整合上方「累积摘要」（若非「尚无」）与本工作区证据后，写出更新后的整体已知信息与缺口（尽量具体）。",
+        "answer": "若已足够回答则填写最终答案，否则为 null",
+        "next_query": "若还需检索则给出下一轮检索 query，否则为 null"
+      }
+
+      规则：
+      - 任何结论仍须可被下方工作区证据支持；累积摘要仅供参考，不能与证据冲突时覆盖证据。
+      - answer 与 next_query 只能有一个不为空。
+      - 若 answer 不为 null，则 next_query 必须为 null。
+      - 若 answer 为 null，则 next_query 必须为一个具体、可执行的检索查询（指向缺失信息）。
+    en: |
+      You are a judge-driven retrieval controller for a memory QA system.
+      You do NOT output SUFFICIENT/INSUFFICIENT/INVALID and you do NOT bind to evidence ids.
+      Your job: summarize currently known useful information for answering the question,
+      then decide either to answer now or to provide a next retrieval query.
+
+      [Original Question]
+      <original_question>
+
+      [Current Retrieval Query]
+      <cur_query>
+
+      [Useful Information So Far]
+      This is cumulative state from prior direct-judge rounds. If it shows "(none yet)", base useful_information only on workspace evidence below.
+      Otherwise merge honestly with workspace evidence—your conclusions must remain supportable by the evidence text.
+
+      <useful_information_so_far>
+
+      [Workspace Evidence (all kept, for reading only; do not cite ids)]
+      <workspace_evidence_summary>
+
+      Return JSON only:
+      {
+        "useful_information": "After merging the block above with workspace evidence, write an updated cumulative summary (include gaps).",
+        "answer": "If sufficient, provide the final answer; otherwise null.",
+        "next_query": "If insufficient, provide the next retrieval query; otherwise null."
+      }
+
+      Rules:
+      - Do not contradict the workspace evidence; the cumulative block is a convenience summary, not a source of facts.
+      - Exactly one of answer / next_query must be non-empty.
+      - If answer is non-null, next_query must be null.
+      - If answer is null, next_query must be a concrete, actionable retrieval query targeting missing info.
+
+  workspace_direct_judge_prompt_final:
+    zh: |
+      你是记忆问答系统的“Judge 驱动”检索控制器。
+      **这是最后一轮（final round）**，不能再发起下一轮检索。
+
+      你的任务是：
+      1) 简要总结当前已知信息（useful_information 可稍长）；
+      2) **必须给出一个可被评测的短答案**（answer），除非工作区证据完全无关/为空。
+
+      【原始问题】
+      <original_question>
+
+      【当前检索查询】
+      <cur_query>
+
+      【Useful Information So Far｜direct 模式跨轮累积（若非「尚无」，须与下方证据核对并在 useful_information 中合并更新）】
+      <useful_information_so_far>
+
+      【工作区证据（全部保留项，仅供你阅读，不要求引用证据编号）】
+      <workspace_evidence_summary>
+
+      仅返回 JSON：
+      {
+        "useful_information": "在整合上方「累积摘要」（若非「尚无」）与本工作区证据后，写出更新后的整体已知信息与缺口（可简短）。",
+        "answer": "基于现有证据给出最好的**短答案**；只有在证据完全无关/为空时才为 null",
+        "next_query": null
+      }
+
+      规则：
+      - 任何结论仍须可被下方工作区证据支持；累积摘要仅供参考，不能与证据冲突时覆盖证据。
+      - next_query 必须为 null。
+      - answer 若不为 null，必须是短答案（不写分析）：
+        - 列表题：逗号分隔列举。
+        - 时间/日期题：给出精确日期/时间。
+        - might/based-on 题：允许输出候选集合（如“California or Florida”），不要因为无法唯一定位就拒答。
+      - 若证据不足以给出唯一值，输出“证据支持的最接近答案/候选集合”，不要输出“需要更多信息”。
+    en: |
+      You are a judge-driven retrieval controller for a memory QA system.
+      This is the FINAL round: you must NOT request another retrieval round.
+
+      Your job:
+      1) Briefly summarize what is known (useful_information may include gaps).
+      2) Produce a SHORT, evaluable final answer (answer), unless the workspace evidence is empty or irrelevant.
+
+      [Original Question]
+      <original_question>
+
+      [Current Retrieval Query]
+      <cur_query>
+
+      [Useful Information So Far]
+      Cumulative summary from earlier direct rounds. If "(none yet)", derive useful_information solely from workspace evidence.
+
+      <useful_information_so_far>
+
+      [Workspace Evidence (all kept, for reading only; do not cite ids)]
+      <workspace_evidence_summary>
+
+      Return JSON only:
+      {
+        "useful_information": "Merge prior summary with workspace evidence into an updated brief summary (may include gaps).",
+        "answer": "Provide the BEST possible SHORT, evaluable final answer; use null ONLY if evidence is empty/irrelevant.",
+        "next_query": null
+      }
+
+      Rules:
+      - Ground everything in workspace evidence text; earlier summary is aide-mémoire only.
+      - next_query MUST be null.
+      - If answer is non-null, it MUST be short and directly scorable:
+        - List questions: return a comma-separated list.
+        - Date/day/time: return the exact value if present.
+        - Might/based-on questions: return the supported candidate set (e.g. \"California or Florida\") instead of refusing.
+      - If evidence cannot support a single exact value, output the closest supported answer/candidate set. Do NOT say \"need more information\" in the final answer.
+
   action_plan_prompt:
     zh: |
       你是记忆问答系统的检索规划器。
@@ -127,6 +267,9 @@ memory_agent:
       【当前检索查询】
       <cur_query>
 
+      【Useful Information So Far】
+      <useful_information_so_far>
+
       【已执行的检索操作】
       <previous_actions_json>
 
@@ -134,10 +277,11 @@ memory_agent:
       <available_tools_json>
 
       指令：
-      1. 分析当前问题与当前检索查询，判断还缺少什么信息。
-      2. 从可用工具中选择至多 <max_actions_per_round> 个最合适的检索操作。
-      3. 避免与已执行操作重复。
-      4. 为每个操作填写具体的查询参数。
+      1. 若上方为证据驱动模式的「不适用」提示，视为无效信号，仅用原始问题、当前检索查询与已执行操作判断缺口；否则可结合该摘要（仅作 planning 线索，非证据）与当前检索目标安排动作。
+      2. 分析当前问题与当前检索查询，判断还缺少什么信息。
+      3. 从可用工具中选择至多 <max_actions_per_round> 个最合适的检索操作。
+      4. 避免与已执行操作重复。
+      5. 为每个操作填写具体的查询参数。
 
       仅返回 JSON：
       {
@@ -165,6 +309,9 @@ memory_agent:
       [Current Retrieval Query]
       <cur_query>
 
+      [Useful Information So Far]
+      <useful_information_so_far>
+
       [Previously Executed Actions]
       <previous_actions_json>
 
@@ -172,10 +319,11 @@ memory_agent:
       <available_tools_json>
 
       Instructions:
-      1. Analyze the current question and current retrieval query to determine what information is still missing.
-      2. Select up to <max_actions_per_round> appropriate retrieval actions from the available tools.
-      3. Avoid duplicating previously executed actions.
-      4. Fill in specific query parameters for each action.
+      1. If the Useful Information So Far block is the explicit N/A message for evidence-driven mode, ignore it completely and plan only from the question, cur_query, and prior actions. Otherwise you may treat it as a planning hint (not evidence).
+      2. Analyze the current question and current retrieval query to determine what information is still missing.
+      3. Select up to <max_actions_per_round> appropriate retrieval actions from the available tools.
+      4. Avoid duplicating previously executed actions.
+      5. Fill in specific query parameters for each action.
 
       Return JSON only:
       {

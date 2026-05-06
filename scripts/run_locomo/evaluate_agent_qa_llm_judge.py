@@ -1043,7 +1043,11 @@ async def main() -> None:
     update_stats_file(
         stats_path=stats_output_path,
         out_samples=samples,
-        stats_model_key=judge_prefix,
+        # Keep stats compatible with existing LoCoMo tooling which expects
+        # per-model keys like "memory_agent" (not per-judge keys like
+        # "memory_agent_llm_judge"). The metric_key still points to the
+        # judge score field (e.g. "memory_agent_llm_judge_score").
+        stats_model_key=model_key,
         metric_key=metric_key,
         metadata=metadata,
         data_file=str(resolve_project_path(args.data_file)),

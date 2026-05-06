@@ -1,9 +1,10 @@
-# LoCoMo env config for conv-26 only
+# LoCoMo env config for conv-50 only
 # Typical usage:
-#   python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/conv-26_env.yaml
+#   python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/conv-50_env.yaml
+#   python scripts/run_locomo/run_locomo_pipeline.py --env-config config/eval/memory_agent/locomo/conv-50_env.yaml --batch --test-id-suffix
 
-name: locomo_conv26_env
-description: Evaluate conv-26 with isolated memory store and fixed test_id.
+name: locomo_conv50_env
+description: Evaluate conv-50 with isolated memory store and fixed test_id.
 
 data:
   file: data/locomo/data/locomo10.json
@@ -11,20 +12,20 @@ data:
 
 selection:
   conv_ids:
-    - conv-26
+    - conv-50
 
 import:
-  process_id: "locomo/conv-26"
-  clean_output: true
+  process_id: "locomo/conv-50"
+  clean_output: false
   episode_max_workers: 6
 
 warmup:
   scene_max_workers: 6
   scene_fact_max_workers: 6
-  force: true
+  force: false
 
 eval:
-  test_id: new_baseline__conv-26—direct
+  test_id: new_baseline__conv-50
   memory_agent_config: config/agents/memory/locomo_eval_memory_agent_full_mode_E2.yaml
   model_key: memory_agent
   prediction_key: memory_agent_prediction
