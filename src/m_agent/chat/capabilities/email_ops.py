@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
 from langchain.tools import tool
+from pydantic import Field
 
 from .base import ControllerCapabilityContext, ControllerCapabilitySpec
 
@@ -23,18 +24,40 @@ def _controller_tool_count(context: ControllerCapabilityContext, *, tool_name: s
 def _build_email_ask_tool(context: ControllerCapabilityContext, description: str):
     @tool("email_ask", description=description)
     def email_ask(
-        instruction: str,
-        mail_scope: Optional[str] = None,
-        debug: bool = False,
+        keywords: Annotated[
+            str,
+            Field(
+                default="",
+                description=(
+                    "Gmail search keywords: short tokens or phrases that should appear in matching mail "
+                    "(subject/body). Leave empty to list mail under mail_scope only "
+                    "(e.g. all unread when mail_scope is unread). "
+                    "Do not paste polite full sentences—split topics into keywords."
+                ),
+            ),
+        ] = "",
+        mail_scope: Annotated[
+            Optional[str],
+            Field(
+                description=(
+                    "Mailbox slice before keyword match: `unread` (default) or `all`. "
+                    "Omit to use the configured default (usually unread)."
+                ),
+            ),
+        ] = None,
+        debug: Annotated[
+            bool,
+            Field(description="When true, include internal EmailAgent trace in the tool result."),
+        ] = False,
     ) -> Dict[str, Any]:
         """Delegate email recall to EmailAgent.ask."""
 
-        safe_instruction = str(instruction or "").strip()
+        safe_keywords = str(keywords or "").strip()
         effective_scope = (
             str(mail_scope or context.tool_default("email_ask", "mail_scope", "unread") or "unread").strip().lower()
         )
         params = {
-            "instruction": safe_instruction,
+            "keywords": safe_keywords,
             "mail_scope": effective_scope,
             "debug": bool(debug),
         }
@@ -64,7 +87,7 @@ def _build_email_ask_tool(context: ControllerCapabilityContext, description: str
 
         try:
             result = email_agent.ask(
-                instruction=safe_instruction,
+                keywords=safe_keywords,
                 mail_scope=effective_scope,
                 debug=bool(debug),
             )

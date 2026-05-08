@@ -89,12 +89,12 @@ chat_controller:
         en: "Use for listing and searching existing schedules, reminders, and upcoming plans."
     email_ask:
       description:
-        zh: "用于按指令和范围（unread/all）检索邮箱内容。"
-        en: "Use for searching email inbox content by instruction and scope (unread/all)."
+        zh: "用于检索邮箱；keywords 为 Gmail 关键词（可留空则按 mail_scope 宽泛列出，如全部未读），mail_scope 为 unread 或 all。"
+        en: "Search Gmail: optional keywords; leave empty to list by mail_scope only (e.g. all unread). mail_scope is unread or all."
     email_read:
       description:
-        zh: "用于读取指定邮件（message_id 或 thread_id）的完整正文内容。"
-        en: "Use for reading full content of a specific email by message_id or thread_id."
+        zh: "读取指定邮件全文；message_id/thread_id 必须从 email_ask 返回的 evidence_index 中原样复制 Gmail REST id，禁止编造或缩写。"
+        en: "Read full email body; message_id/thread_id must be copied exactly from email_ask evidence_index (Gmail REST ids). Never invent or abbreviate."
     email_send:
       description:
         zh: "用于发送邮件，支持收件人、主题和正文。"

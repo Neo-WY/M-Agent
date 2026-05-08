@@ -136,13 +136,14 @@ def test_read_message_returns_full_body(tmp_path: Path) -> None:
     fake_client = _FakeGmailClient()
     agent = EmailAgent(config_path=config_path, gmail_client=fake_client)
 
-    result = agent.read(message_id="msg-1")
+    long_mid = "abcdef123456789012345678"
+    result = agent.read(message_id=long_mid)
 
     assert result["insufficient"] is False
     assert result["message_count"] == 1
     assert result["messages"]
     first = result["messages"][0]
-    assert first["message_id"] == "msg-1"
+    assert first["message_id"] == long_mid
     assert "Full message body for internship update." in first["body_text"]
 
 
@@ -172,6 +173,19 @@ def test_ask_returns_evidence_index_items(tmp_path: Path) -> None:
     assert first["thread_id"]
     assert first["message_id"]
     assert isinstance(result["answer"], str) and result["answer"]
+
+
+def test_ask_empty_keywords_uses_unread_wide_query(tmp_path: Path) -> None:
+    config_path = _write_email_config(tmp_path)
+    fake_client = _FakeGmailClient()
+    agent = EmailAgent(config_path=config_path, gmail_client=fake_client)
+
+    result = agent.ask("", mail_scope="unread")
+
+    assert isinstance(result["answer"], str) and result["answer"]
+    assert fake_client.thread_queries
+    assert fake_client.thread_queries[0] == "is:unread"
+    assert result["search_query"] == "is:unread"
 
 
 def test_ask_rewrites_natural_language_and_applies_mail_scope(tmp_path: Path) -> None:
