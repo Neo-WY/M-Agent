@@ -22,14 +22,90 @@ logger = logging.getLogger(__name__)
 
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
 _EVIDENCE_REF_PREFIX_RE = re.compile(r"^\s*ref\s*[:：]\s*", flags=re.IGNORECASE)
+_JUDGE_RAW_LOG_MAX_CHARS = 12000
 
 
-class JudgeDecision(TypedDict):
+class _JudgeDecisionRequired(TypedDict):
     status: WorkspaceStatus
     useful_evidence_ids: List[str]
     reason: str
     next_query: str | None
     gap_type: str | None
+
+
+class JudgeDecision(_JudgeDecisionRequired, total=False):
+    parse_failed: bool
+
+
+# ---------------------------------------------------------------------------
+# Direct judge (no evidence binding)
+# ---------------------------------------------------------------------------
+
+class _DirectJudgeDecisionRequired(TypedDict):
+    useful_information: str
+    answer: str | None
+    next_query: str | None
+
+
+class DirectJudgeDecision(_DirectJudgeDecisionRequired, total=False):
+    parse_failed: bool
+
+
+def llm_judge_direct(
+    *,
+    llm_func: Callable[[str], Any],
+    prompt_text: str,
+) -> DirectJudgeDecision:
+    """Judge-driven decision without workspace status/evidence binding.
+
+    Expected JSON schema:
+    {
+      "useful_information": "...",
+      "answer": "..." | null,
+      "next_query": "..." | null
+    }
+
+    Constraint: exactly one of answer / next_query should be non-empty.
+    """
+    raw_response = llm_func(prompt_text)
+    response_text = _extract_text(raw_response)
+    parsed = _parse_judge_response(response_text)
+    parse_failed = not bool(parsed)
+    if parse_failed:
+        logger.warning(
+            "direct_judge parse_failed=true; raw_response follows (truncated=%s chars)\n"
+            "=== direct_judge_raw_response_begin ===\n%s\n"
+            "=== direct_judge_raw_response_end ===",
+            _JUDGE_RAW_LOG_MAX_CHARS,
+            _clip_for_log(response_text, _JUDGE_RAW_LOG_MAX_CHARS),
+        )
+
+    useful_information = str(parsed.get("useful_information", "") or "").strip()
+
+    answer_raw = parsed.get("answer")
+    answer = str(answer_raw).strip() if isinstance(answer_raw, str) else None
+    if isinstance(answer, str) and not answer:
+        answer = None
+
+    next_query_raw = parsed.get("next_query")
+    next_query = str(next_query_raw).strip() if isinstance(next_query_raw, str) else None
+    if isinstance(next_query, str) and not next_query:
+        next_query = None
+
+    # Enforce mutual exclusion with a conservative fail-safe.
+    if answer and next_query:
+        # Prefer answer (stop condition) and discard next_query.
+        next_query = None
+    elif not answer and not next_query:
+        # If both missing, mark parse_failed so caller can preserve existing cur_query.
+        parse_failed = True
+
+    return {
+        "useful_information": useful_information,
+        "answer": answer,
+        "next_query": next_query,
+        "parse_failed": parse_failed,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +164,15 @@ def llm_judge_workspace(
     raw_response = llm_func(prompt_text)
     response_text = _extract_text(raw_response)
     parsed = _parse_judge_response(response_text)
+    parse_failed = not bool(parsed)
+    if parse_failed:
+        logger.warning(
+            "workspace_judge parse_failed=true; raw_response follows (truncated=%s chars)\n"
+            "=== workspace_judge_raw_response_begin ===\n%s\n"
+            "=== workspace_judge_raw_response_end ===",
+            _JUDGE_RAW_LOG_MAX_CHARS,
+            _clip_for_log(response_text, _JUDGE_RAW_LOG_MAX_CHARS),
+        )
 
     status = parsed.get("status", "").strip().upper()
     if status not in {"SUFFICIENT", "INSUFFICIENT", "INVALID"}:
@@ -134,6 +219,7 @@ def llm_judge_workspace(
         "reason": reason,
         "next_query": next_query,
         "gap_type": gap_type,
+        "parse_failed": parse_failed,
     }
 
 
@@ -154,10 +240,21 @@ def _parse_judge_response(text: str) -> Dict[str, Any]:
     if not match:
         logger.warning("Could not extract JSON from judge response")
         return {}
+    raw = match.group()
     try:
-        return json.loads(match.group())
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         logger.warning("Failed to parse judge JSON: %s", exc)
+        repaired = _repair_common_judge_json_issues(raw)
+        if repaired != raw:
+            try:
+                parsed = json.loads(repaired)
+                logger.warning(
+                    "workspace_judge JSON parse succeeded after auto-repair of common escape issues"
+                )
+                return parsed
+            except json.JSONDecodeError as exc2:
+                logger.warning("Judge JSON still invalid after auto-repair: %s", exc2)
         return {}
 
 
@@ -180,3 +277,25 @@ def _normalize_evidence_id(raw: Any) -> str:
     if (text.startswith("`") and text.endswith("`")) or (text.startswith('"') and text.endswith('"')):
         text = text[1:-1].strip()
     return text
+
+
+def _clip_for_log(text: str, max_chars: int) -> str:
+    body = str(text or "")
+    if len(body) <= max_chars:
+        return body
+    return body[:max_chars] + "\n...(truncated)..."
+
+
+def _repair_common_judge_json_issues(text: str) -> str:
+    """Best-effort repair for common LLM JSON quoting mistakes.
+
+    Current target: values incorrectly written as \\\"...\\\" after a colon.
+    Example bad:  "next_query": \"foo\"
+    Example good: "next_query": "foo"
+    """
+    fixed = str(text or "")
+    # Fix opening escaped quote after ":".
+    fixed = re.sub(r'(:\s*)\\"', r'\1"', fixed)
+    # Fix closing escaped quote before comma/object end.
+    fixed = re.sub(r'\\"(\s*[,}\]])', r'"\1', fixed)
+    return fixed

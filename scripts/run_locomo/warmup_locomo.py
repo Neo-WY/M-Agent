@@ -267,8 +267,6 @@ def main() -> int:
     # Keep episodes/ and dialogues/ (import outputs), but wipe local_store so profiles/libraries do not
     # start from previously saved files.
     if force_kg:
-        from m_agent.paths import memory_workflow_dir
-
         wf_root = memory_workflow_dir(workflow_id)
         local_store = wf_root / "local_store"
         if local_store.exists() and local_store.is_dir():

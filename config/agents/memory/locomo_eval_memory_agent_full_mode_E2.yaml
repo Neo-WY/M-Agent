@@ -23,6 +23,7 @@ auto_bootstrap_kg_data: true
 detail_search_defaults:
   topk: 10
 workspace:
+  # judge_mode: direct
   enable_state_machine: true
   max_rounds: 3
   max_actions_per_round: 5

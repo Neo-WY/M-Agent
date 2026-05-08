@@ -23,6 +23,7 @@ class WorkspaceState(TypedDict):
     round_id: int
     original_question: str
     cur_query: str
+    direct_useful_information: str
     evidences: List[WorkspaceDocument]
     kept_evidence_ids: List[str]
     status: WorkspaceStatus
@@ -84,6 +85,8 @@ class Workspace:
     gap_type: Optional[str] = None
     original_question: str = ""
     cur_query: str = ""
+    # Direct judge_mode only: latest cumulative useful_information for cross-round prompts; unused ("") in evidence-driven runs.
+    direct_useful_information: str = ""
     _documents: Dict[str, WorkspaceDocument] = field(default_factory=dict)
     _insert_order: List[str] = field(default_factory=list)
     kept_evidence_ids: List[str] = field(default_factory=list)
@@ -177,6 +180,7 @@ class Workspace:
             "round_id": self.round_id,
             "original_question": self.original_question,
             "cur_query": self.cur_query,
+            "direct_useful_information": str(self.direct_useful_information or ""),
             "evidences": self.all_evidences(),
             "kept_evidence_ids": list(self.kept_evidence_ids),
             "status": self.status,

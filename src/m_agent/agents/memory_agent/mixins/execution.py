@@ -17,7 +17,7 @@ from ..action_planner import (
     plan_actions_rule_based,
     tool_registry_for_prompt,
 )
-from ..answerability import JudgeDecision, llm_judge_workspace
+from ..answerability import DirectJudgeDecision, JudgeDecision, llm_judge_direct, llm_judge_workspace
 from ..workspace import Workspace
 from m_agent.utils.api_error_utils import is_network_api_error
 
@@ -243,6 +243,39 @@ class MemoryAgentExecutionMixin:
     # LLM action planner
     # ------------------------------------------------------------------
 
+    def _resolved_prompt_language_lower(self) -> str:
+        return str(getattr(self, "prompt_language", "zh") or "zh").strip().lower()
+
+    def _useful_information_so_far_for_action_planner(self, workspace: Workspace) -> str:
+        """Planner-only text: explicit N/A in evidence-driven mode to avoid polluting evidence paths."""
+        judge_mode = str(getattr(self, "workspace_judge_mode", "evidence") or "evidence").strip().lower()
+        is_zh = self._resolved_prompt_language_lower() == "zh"
+        if judge_mode != "direct":
+            if is_zh:
+                return (
+                    "（不适用）证据驱动模式不使用该累积字段；请勿将其当作事实或证据，"
+                    "仅依据原始问题、当前检索查询、已执行操作与可用工具进行规划。"
+                )
+            return (
+                "(N/A) Evidence-driven mode does not use this cumulative field. "
+                "Do not treat it as facts or evidence; plan only from the original question, "
+                "cur_query, prior actions, and available tools."
+            )
+        cum = str(workspace.direct_useful_information or "").strip()
+        if cum:
+            return cum
+        if is_zh:
+            return "（尚无）direct 模式首轮或上一轮 judge 未产出 useful_information。"
+        return "(none yet) First direct round or no useful_information from the prior judge."
+
+    def _useful_information_so_far_for_direct_judge(self, workspace: Workspace) -> str:
+        cum = str(workspace.direct_useful_information or "").strip()
+        if cum:
+            return cum
+        if self._resolved_prompt_language_lower() == "zh":
+            return "（尚无）"
+        return "(none yet)"
+
     def _build_action_plan_prompt(
         self,
         workspace: Workspace,
@@ -261,6 +294,7 @@ class MemoryAgentExecutionMixin:
                 "<original_question>": workspace.original_question,
                 "<cur_query>": workspace.cur_query,
                 "<workspace_summary>": workspace_summary,
+                "<useful_information_so_far>": self._useful_information_so_far_for_action_planner(workspace),
                 "<previous_actions_json>": json.dumps(prev_actions, ensure_ascii=False),
                 "<available_tools_json>": json.dumps(tools, ensure_ascii=False, indent=2),
                 "<max_actions_per_round>": str(
@@ -461,6 +495,31 @@ class MemoryAgentExecutionMixin:
             prompt_text=prompt_text,
         )
 
+    def _build_workspace_direct_judge_prompt(self, workspace: Workspace, *, prompt_key: str) -> str:
+        summary, _ = workspace.to_evidence_summary_with_ref_ids(prefer_judge_view=True)
+        return self._render_runtime_prompt(
+            prompt_key,
+            replacements={
+                "<original_question>": workspace.original_question,
+                "<cur_query>": workspace.cur_query,
+                "<workspace_evidence_summary>": summary,
+                "<useful_information_so_far>": self._useful_information_so_far_for_direct_judge(workspace),
+            },
+        )
+
+    def _run_direct_judge(self, workspace: Workspace, *, is_final_round: bool) -> "DirectJudgeDecision":
+        prompt_text = self._build_workspace_direct_judge_prompt(
+            workspace,
+            prompt_key=("workspace_direct_judge_prompt_final" if is_final_round else "workspace_direct_judge_prompt"),
+        )
+        return llm_judge_direct(
+            llm_func=lambda text: self._invoke_model_with_network_retry(
+                prompt_text=text,
+                call_name="workspace_direct_judge",
+            ),
+            prompt_text=prompt_text,
+        )
+
     # ------------------------------------------------------------------
     # Main state-machine loop
     # ------------------------------------------------------------------
@@ -495,6 +554,10 @@ class MemoryAgentExecutionMixin:
         detail_defaults = getattr(self, "detail_search_defaults", {"topk": 5})
         default_topk = max(1, int(detail_defaults.get("topk", 5)))
         prev_useful_frozen: frozenset[str] | None = None
+        judge_mode = str(getattr(self, "workspace_judge_mode", "evidence") or "evidence").strip().lower()
+        last_direct_useful_information: str = ""
+        last_direct_answer: str = ""
+        direct_should_stop: bool = False
         for round_id in range(1, max(1, int(max_rounds)) + 1):
             workspace.set_round(round_id)
             cur_query = workspace.cur_query
@@ -515,6 +578,7 @@ class MemoryAgentExecutionMixin:
                 "status": None,
                 "workspace_status": None,
             }
+            round_record["judge_mode"] = judge_mode
 
             force_remedy = (
                 last_status == "INVALID"
@@ -728,6 +792,7 @@ class MemoryAgentExecutionMixin:
                 if hasattr(self.memory_sys, "search_entity_status_answer")
                 else None,
                 max_episode_candidates=max_episode_candidates,
+                forced_detail_topk=default_topk,
                 entity_workspace_mode=str(
                     getattr(self, "workspace_entity_workspace_mode", "default") or "default"
                 ).strip().lower(),
@@ -753,94 +818,179 @@ class MemoryAgentExecutionMixin:
             )
             # Snapshot after rerank + keep_top (before judge).
             round_record["workspace_after_rerank"] = workspace.snapshot()
+            if judge_mode == "direct":
+                is_final_round = round_id >= max(1, int(max_rounds))
+                direct = self._run_direct_judge(workspace, is_final_round=is_final_round)
+                parse_failed = bool(direct.get("parse_failed", False))
+                useful_information = str(direct.get("useful_information", "") or "").strip()
+                answer = direct.get("answer")
+                next_query = direct.get("next_query")
 
-            decision = self._run_llm_judge(workspace, new_evidence_ids)
-            workspace.mark(decision["status"], decision.get("gap_type"))
-            last_status = decision["status"]
+                if useful_information:
+                    last_direct_useful_information = useful_information
+                if not parse_failed and useful_information:
+                    workspace.direct_useful_information = useful_information
+                answer_text = str(answer or "").strip() if isinstance(answer, str) else ""
+                answer_present = bool(answer_text)
+                if answer_present:
+                    last_direct_answer = answer_text
+                    direct_should_stop = True
 
-            useful_ids = [
-                str(x).strip()
-                for x in (decision.get("useful_evidence_ids") or [])
-                if str(x).strip()
-            ]
-            useful_frozen = frozenset(useful_ids)
-            stagnant = (
-                decision["status"] == "INSUFFICIENT"
-                and prev_useful_frozen is not None
-                and useful_frozen == prev_useful_frozen
-            )
-            if stagnant:
-                workspace.mark("INSUFFICIENT", "stagnant")
+                if next_query and not parse_failed and not answer_present:
+                    workspace.cur_query = next_query
 
-            if decision["status"] == "INSUFFICIENT" and decision.get("next_query") and not stagnant:
-                workspace.cur_query = decision["next_query"]
+                round_record["judge"] = self._safe_trace_value(direct)
+                round_record["judge_result"] = round_record["judge"]
+                round_record["workspace_after_judge"] = workspace.snapshot()
+                round_record["status"] = workspace.status
+                round_record["workspace_status"] = workspace.status
+                workspace_rounds.append(round_record)
 
-            keep_pool = set(useful_ids) | set(new_evidence_ids)
-            workspace.prune_except(keep_pool)
-            survivors = [e for e in useful_ids if workspace.has_evidence(e)]
-            if not survivors:
-                survivors = [e for e in new_evidence_ids if workspace.has_evidence(e)]
-            workspace.kept_evidence_ids = survivors
+                trace_item = {
+                    "round_id": round_id,
+                    "status": "DIRECT",
+                    "gap_type": workspace.gap_type,
+                    "reason": None,
+                    "next_query": next_query,
+                    "answer_present": answer_present,
+                    "action_types": [str(action.get("action_type", "")) for action in actions],
+                    "episode_ref_count": len(report.get("episode_refs", [])),
+                    "kept_evidence_count": len(workspace.kept_evidence_ids),
+                    "judge_parse_failed": parse_failed,
+                }
+                round_traces.append(trace_item)
+                self._log_structured_trace(
+                    self._TRACE_PREFIX_WORKSPACE_STATE,
+                    {
+                        "phase": "round_judged",
+                        **trace_item,
+                        "workspace": workspace.snapshot(),
+                    },
+                )
 
-            round_record["judge"] = self._safe_trace_value(decision)
-            round_record["judge_result"] = round_record["judge"]
-            round_record["workspace_after_judge"] = workspace.snapshot()
-            round_record["status"] = workspace.status
-            round_record["workspace_status"] = workspace.status
-            workspace_rounds.append(round_record)
+                last_status = "DIRECT"
+                if direct_should_stop:
+                    break
+                if round_id >= max(1, int(max_rounds)):
+                    break
+            else:
+                decision = self._run_llm_judge(workspace, new_evidence_ids)
+                workspace.mark(decision["status"], decision.get("gap_type"))
+                last_status = decision["status"]
+                parse_failed = bool(decision.get("parse_failed", False))
 
-            trace_item = {
-                "round_id": round_id,
-                "status": decision["status"],
-                "gap_type": workspace.gap_type,
-                "reason": decision.get("reason"),
-                "next_query": decision.get("next_query"),
-                "action_types": [str(action.get("action_type", "")) for action in actions],
-                "episode_ref_count": len(report.get("episode_refs", [])),
-                "kept_evidence_count": len(workspace.kept_evidence_ids),
-                "useful_evidence_count": len(decision.get("useful_evidence_ids", [])),
-                "stagnant": stagnant,
-            }
-            round_traces.append(trace_item)
-            self._log_structured_trace(
-                self._TRACE_PREFIX_WORKSPACE_STATE,
-                {
-                    "phase": "round_judged",
-                    **trace_item,
-                    "workspace": workspace.snapshot(),
-                },
-            )
+                useful_ids = [
+                    str(x).strip()
+                    for x in (decision.get("useful_evidence_ids") or [])
+                    if str(x).strip()
+                ]
+                useful_frozen = frozenset(useful_ids)
+                stagnant = False
+                if not parse_failed:
+                    stagnant = (
+                        decision["status"] == "INSUFFICIENT"
+                        and prev_useful_frozen is not None
+                        and useful_frozen == prev_useful_frozen
+                    )
+                    if stagnant:
+                        workspace.mark("INSUFFICIENT", "stagnant")
 
-            prev_useful_frozen = useful_frozen
+                if (
+                    decision["status"] == "INSUFFICIENT"
+                    and decision.get("next_query")
+                    and not stagnant
+                    and not parse_failed
+                ):
+                    workspace.cur_query = decision["next_query"]
 
-            if decision["status"] == "SUFFICIENT":
-                break
-            if stagnant:
-                break
-            if decision["status"] == "INVALID" and remedy_used >= remedy_limit:
-                break
-            if round_id >= max(1, int(max_rounds)):
-                break
+                if parse_failed:
+                    # Fail-safe: keep existing evidence pool and kept ids unchanged when judge output is not parseable.
+                    logger.warning(
+                        "workspace_judge parse failed at round=%s; preserving existing workspace evidences/kept ids",
+                        round_id,
+                    )
+                else:
+                    keep_pool = set(useful_ids) | set(new_evidence_ids)
+                    workspace.prune_except(keep_pool)
+                    survivors = [e for e in useful_ids if workspace.has_evidence(e)]
+                    if not survivors:
+                        survivors = [e for e in new_evidence_ids if workspace.has_evidence(e)]
+                    workspace.kept_evidence_ids = survivors
 
-        if workspace.status == "SUFFICIENT":
-            payload = self._generate_final_payload_from_workspace(
-                question_text=question_text,
-                question_plan=question_plan,
-                workspace=workspace,
-            )
-        elif workspace.kept_evidence_ids:
-            logger.info(
-                "Workspace status is %s but %d kept evidence(s) exist; generating best-effort answer",
-                workspace.status,
-                len(workspace.kept_evidence_ids),
-            )
-            payload = self._generate_final_payload_from_workspace(
-                question_text=question_text,
-                question_plan=question_plan,
-                workspace=workspace,
-            )
+                round_record["judge"] = self._safe_trace_value(decision)
+                round_record["judge_result"] = round_record["judge"]
+                round_record["workspace_after_judge"] = workspace.snapshot()
+                round_record["status"] = workspace.status
+                round_record["workspace_status"] = workspace.status
+                workspace_rounds.append(round_record)
+
+                trace_item = {
+                    "round_id": round_id,
+                    "status": decision["status"],
+                    "gap_type": workspace.gap_type,
+                    "reason": decision.get("reason"),
+                    "next_query": decision.get("next_query"),
+                    "action_types": [str(action.get("action_type", "")) for action in actions],
+                    "episode_ref_count": len(report.get("episode_refs", [])),
+                    "kept_evidence_count": len(workspace.kept_evidence_ids),
+                    "useful_evidence_count": len(decision.get("useful_evidence_ids", [])),
+                    "judge_parse_failed": parse_failed,
+                    "stagnant": stagnant,
+                }
+                round_traces.append(trace_item)
+                self._log_structured_trace(
+                    self._TRACE_PREFIX_WORKSPACE_STATE,
+                    {
+                        "phase": "round_judged",
+                        **trace_item,
+                        "workspace": workspace.snapshot(),
+                    },
+                )
+
+                if not parse_failed:
+                    prev_useful_frozen = useful_frozen
+
+                if decision["status"] == "SUFFICIENT":
+                    break
+                if stagnant:
+                    break
+                if decision["status"] == "INVALID" and remedy_used >= remedy_limit:
+                    break
+                if round_id >= max(1, int(max_rounds)):
+                    break
+
+        if judge_mode == "direct":
+            # Direct mode: use the judge's short `answer` as final output.
+            # `useful_information` is allowed to be verbose analysis; only used as fallback.
+            final_text = (last_direct_answer or last_direct_useful_information).strip()
+            if final_text:
+                payload = {
+                    "answer": final_text,
+                    "gold_answer": final_text,
+                    "evidence": None,
+                }
+            else:
+                payload = self._build_insufficient_payload(question_text, workspace)
         else:
-            payload = self._build_insufficient_payload(question_text, workspace)
+            if workspace.status == "SUFFICIENT":
+                payload = self._generate_final_payload_from_workspace(
+                    question_text=question_text,
+                    question_plan=question_plan,
+                    workspace=workspace,
+                )
+            elif workspace.kept_evidence_ids:
+                logger.info(
+                    "Workspace status is %s but %d kept evidence(s) exist; generating best-effort answer",
+                    workspace.status,
+                    len(workspace.kept_evidence_ids),
+                )
+                payload = self._generate_final_payload_from_workspace(
+                    question_text=question_text,
+                    question_plan=question_plan,
+                    workspace=workspace,
+                )
+            else:
+                payload = self._build_insufficient_payload(question_text, workspace)
 
         self._log_structured_trace(
             self._TRACE_PREFIX_WORKSPACE_STATE,

@@ -2,7 +2,7 @@ EVENT_DETAIL_RECALL:
   description:
     zh: "对记忆片段的事实和对话内容进行语义检索。适用于关于事件、话题或人物的一般性问题。"
     en: "Semantic search over episode facts and dialogue details. Best for general questions about events, topics, or people."
-  params: '{"detail_query": "<search query>", "topk": <int, default 10>}'
+  params: '{"detail_query": "<search query>"}'
   planner_quota:
     # Fallback guarantee: even if the question looks “entity-ish”, we still want at least
     # one dialogue-grounded retrieval in round-1 to avoid starving episodic evidence.
@@ -35,7 +35,7 @@ EVENT_DETAIL_MULTI_ROUTE_RECALL:
   description:
     zh: "多路并行语义召回（entity/action/time/relation/topic）并融合。适用于需要扩大召回覆盖面的场景。"
     en: "Parallel multi-route semantic recall (entity/action/time/relation/topic) with fusion. Use to broaden coverage when single-route recall is insufficient."
-  params: '{"detail_query": "<search query>", "topk": <int, default 10>}'
+  params: '{"detail_query": "<search query>"}'
   planner_quota:
     min_round1: 0
     max_per_round: 1
@@ -107,7 +107,7 @@ RECALL_REMEDY_MULTI_ROUTE:
   description:
     zh: "多路召回补救措施。当 EVENT_DETAIL_RECALL 已经被调用过一次但工作区仍 INSUFFICIENT 时，应立即使用此工具进行多路扩展召回（按 entity / action / time / relation / topic 五个路由并行检索并融合结果）。"
     en: "Broad multi-route recall (parallel queries via entity/action/time/relation/topic routes, RRF-fused). Use whenever EVENT_DETAIL_RECALL has already been called once and the workspace is still INSUFFICIENT — escalate aggressively rather than repeating EVENT_DETAIL_RECALL with paraphrased queries."
-  params: '{"detail_query": "<search query>", "topk": <int, default 10>}'
+  params: '{"detail_query": "<search query>"}'
   planner_quota:
     min_round1: 0
     max_per_round: 1
