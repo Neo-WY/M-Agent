@@ -122,3 +122,4 @@ flowchart LR
 
 `ChatAgent = Web UI + ChatRunState + SimpleMemoryChatAgent + MemoryAgent + ChatMemoryPersistence`。  
 前端负责发消息和轮询状态，`MemoryAgent` 负责检索/推理，`FunctionTraceHandler` 把中间过程喂给 `Thinking` 面板，`ChatMemoryPersistence` 则把本轮对话写入 `data/memory/test_agent` 并立刻重新导入 `MemoryCore`。
+

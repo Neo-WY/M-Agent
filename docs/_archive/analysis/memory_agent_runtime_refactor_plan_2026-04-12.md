@@ -379,3 +379,4 @@ class WorkspaceState(TypedDict):
 3. 最后接入 cross-encoder 硬过滤，把性能瓶颈从 LLM 判别转为批量模型判分。
 
 这样可以在不依赖实体层的前提下，把 MemoryAgent 从“工具调用驱动”升级为“证据状态驱动”，并且和你后续的实体层扩展天然兼容。
+

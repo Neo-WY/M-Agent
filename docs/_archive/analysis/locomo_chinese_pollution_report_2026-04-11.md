@@ -1,4 +1,4 @@
-﻿# LoCoMo 测试“中文污染”排查报告（2026-04-11）
+# LoCoMo 测试“中文污染”排查报告（2026-04-11）
 
 ## 1. 背景与范围
 - 目标配置：`config/eval/memory_agent/locomo/test_env.yaml`
@@ -106,3 +106,4 @@
 - `src/m_agent/prompt_utils.py`
 - `log/rebuild_test_facts_only/locomo10_agent_qa.json`
 - `log/rebuild_test_facts_only/locomo10_agent_qa_qa_trace.jsonl`
+

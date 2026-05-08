@@ -1,4 +1,4 @@
-﻿# `locomo10.json` 字段取样分析
+# `locomo10.json` 字段取样分析
 
 ## 1. 文件概览
 - 文件路径: `data/locomo/data/locomo10.json`
@@ -156,3 +156,4 @@
 - 该文件是一个结构较稳定的多会话对话数据集，核心字段齐全，`conversation/event_summary/observation/session_summary` 的会话编号大体一致。
 - 主要不一致点集中在证据字段格式（`qa.evidence` 和 `observation` 的少量组合引用）以及 `conv-26` 存在额外 `session_x_date_time` 占位键。
 - 如果后续要做严格 schema 校验，建议对 `evidence` 做标准化（拆分多引用）并单独处理 `conv-26` 的多余日期键。
+
