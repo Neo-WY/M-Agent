@@ -1,7 +1,7 @@
 # M-Agent
 
 **M-Agent** 是一个以**记忆**为核心、面向**个人信息生活**的智能体框架。
-![pipeline_img](docs\M-Agent.png)
+![pipeline_img](docs/M-Agent.png)
 
 
 
