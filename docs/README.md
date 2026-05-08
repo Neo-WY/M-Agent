@@ -5,6 +5,7 @@
 ## 1. 入门与项目结构
 
 - **项目结构与约定**：`docs/project-structure.md`
+- **长期开发分支：迭代前同步 main、迭代后合回 main**：`docs/git-workflow-long-lived-branch-zh.md`
 - **仓库根目录 README（中文）**：`README-zh.md`
 - **仓库根目录 README（English）**：`README.md`
 

@@ -49,6 +49,10 @@ _QUERY_NOISE_PHRASES: tuple[str, ...] = (
     "\u4e00\u4e0b",  # 一下
     "\u5e2e\u5fd9",  # 帮忙
 )
+# Gmail users.messages / users.threads REST ids are opaque strings (typically long hex-like tokens).
+_GMAIL_REST_ID_MIN_LEN = 12
+_GMAIL_REST_ID_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
+
 _QUERY_HINT_TERMS: tuple[str, ...] = (
     "\u5b9e\u4e60",  # 实习
     "\u62db\u8058",  # 招聘
@@ -168,14 +172,21 @@ class EmailAgent:
         return defaults
 
     def _build_tools(self) -> List[Any]:
-        @tool("ask", description="Search Gmail by instruction. mail_scope supports: unread or all.")
-        def ask_tool(instruction: str, mail_scope: str = "unread", debug: bool = False) -> Dict[str, Any]:
-            return self.ask(instruction=instruction, mail_scope=mail_scope, debug=debug)
+        @tool(
+            "ask",
+            description=(
+                "Search Gmail by keywords (optional). Empty keywords lists mail by mail_scope only "
+                "(e.g. all unread). mail_scope: unread or all."
+            ),
+        )
+        def ask_tool(keywords: str = "", mail_scope: str = "unread", debug: bool = False) -> Dict[str, Any]:
+            return self.ask(keywords=keywords, mail_scope=mail_scope, debug=debug)
 
         @tool(
             "read",
             description=(
-                "Read one specific email by message_id or thread_id. "
+                "Read one specific email by message_id or thread_id (Gmail REST ids from prior search). "
+                "message_id/thread_id must be copied exactly from ask() results (evidence_index); never invent ids. "
                 "Returns full body text plus key metadata."
             ),
         )
@@ -252,6 +263,21 @@ class EmailAgent:
         return scope
 
     @staticmethod
+    def _validate_gmail_rest_id(label: str, value: str) -> None:
+        cleaned = str(value or "").strip()
+        if len(cleaned) < _GMAIL_REST_ID_MIN_LEN:
+            raise ValueError(
+                f"Invalid {label} ({cleaned!r}): Gmail ids are long opaque strings returned by the API. "
+                "Copy message_id or thread_id exactly from email_ask output (evidence_index); "
+                "do not invent, guess, truncate, or substitute RFC Message-Ids."
+            )
+        if not _GMAIL_REST_ID_RE.match(cleaned):
+            raise ValueError(
+                f"Invalid {label} ({cleaned!r}): id must contain only letters, digits, hyphen, underscore. "
+                "Use the exact Gmail REST id from email_ask evidence_index."
+            )
+
+    @staticmethod
     def _dedupe_keep_order(items: Sequence[str]) -> List[str]:
         seen: set[str] = set()
         result: List[str] = []
@@ -266,8 +292,8 @@ class EmailAgent:
             result.append(value)
         return result
 
-    def _extract_core_terms(self, instruction: str) -> List[str]:
-        safe = str(instruction or "").strip()
+    def _extract_core_terms(self, text: str) -> List[str]:
+        safe = str(text or "").strip()
         if not safe:
             return []
         quoted_terms = [x.strip() for x in _QUOTED_TERM_PATTERN.findall(safe) if x.strip()]
@@ -282,10 +308,10 @@ class EmailAgent:
         filtered = [x for x in merged if x not in _QUERY_NOISE_PHRASES]
         return self._dedupe_keep_order(filtered)
 
-    def _plan_search_queries(self, instruction: str) -> List[str]:
-        safe = str(instruction or "").strip()
+    def _plan_search_queries(self, keywords: str) -> List[str]:
+        safe = str(keywords or "").strip()
         if not safe:
-            return []
+            return [""]
         terms = self._extract_core_terms(safe)
         if not terms:
             return [safe]
@@ -330,15 +356,13 @@ class EmailAgent:
                 return refs, scoped_query
         return [], last_query
 
-    def ask(self, instruction: str, mail_scope: str = "unread", debug: bool = False) -> Dict[str, Any]:
-        safe_instruction = str(instruction or "").strip()
-        if not safe_instruction:
-            raise ValueError("instruction must be a non-empty string")
+    def ask(self, keywords: str = "", mail_scope: str = "unread", debug: bool = False) -> Dict[str, Any]:
+        safe_keywords = str(keywords or "").strip()
         scope = self._normalize_mail_scope(mail_scope)
 
         self._begin_round()
         try:
-            query_candidates = self._plan_search_queries(safe_instruction)
+            query_candidates = self._plan_search_queries(safe_keywords)
             thread_refs, thread_query = self._search_candidates(
                 kind="threads",
                 query_candidates=query_candidates,
@@ -376,7 +400,7 @@ class EmailAgent:
             ]
             facts = self._tool_extract_facts(threads=threads)
             metrics = self._tool_aggregate_facts(facts=facts)
-            summary = self._build_recall_answer(instruction=safe_instruction, facts=facts, metrics=metrics)
+            summary = self._build_recall_answer(keywords=safe_keywords, facts=facts, metrics=metrics)
             evidence_index = self._build_evidence_index(facts=facts, limit=20)
             evidence_summary = self._build_evidence_summary(metrics=metrics, evidence_index=evidence_index)
             insufficient = int(metrics.get("total_messages", 0) or 0) == 0
@@ -409,6 +433,11 @@ class EmailAgent:
         safe_thread_id = str(thread_id or "").strip()
         if not safe_message_id and not safe_thread_id:
             raise ValueError("message_id or thread_id must be provided")
+
+        if safe_message_id:
+            self._validate_gmail_rest_id("message_id", safe_message_id)
+        else:
+            self._validate_gmail_rest_id("thread_id", safe_thread_id)
 
         chars_limit = self._resolve_read_max_chars(max_chars)
         self._begin_round()
@@ -941,12 +970,15 @@ class EmailAgent:
         return " | ".join(parts)
 
     @staticmethod
-    def _build_recall_answer(*, instruction: str, facts: Dict[str, Any], metrics: Dict[str, Any]) -> str:
+    def _build_recall_answer(*, keywords: str, facts: Dict[str, Any], metrics: Dict[str, Any]) -> str:
         threads = facts.get("threads") if isinstance(facts.get("threads"), list) else []
         total_threads = int(metrics.get("total_threads", 0) or 0)
         total_messages = int(metrics.get("total_messages", 0) or 0)
+        has_keywords = bool(str(keywords or "").strip())
         if total_messages <= 0:
-            return f'未找到与"{instruction}"相关的邮件。'
+            if not has_keywords:
+                return "未找到符合条件的邮件。"
+            return f'未找到与"{keywords}"相关的邮件。'
 
         parts: List[str] = []
         for item in threads[:3]:
@@ -954,9 +986,10 @@ class EmailAgent:
             sender = str(item.get("latest_from", "") or "").strip() or "未知发件人"
             parts.append(f"{subject} | {sender}")
 
+        rel = "相关" if has_keywords else ""
         if parts:
-            return f"找到 {total_threads} 个会话、{total_messages} 封相关邮件。重点：{'；'.join(parts)}"
-        return f"找到 {total_threads} 个会话、{total_messages} 封相关邮件。"
+            return f"找到 {total_threads} 个会话、{total_messages} 封{rel}邮件。重点：{'；'.join(parts)}"
+        return f"找到 {total_threads} 个会话、{total_messages} 封{rel}邮件。"
 
 
 def create_email_agent(config_path: str | Path = DEFAULT_CONFIG_PATH) -> EmailAgent:
@@ -966,11 +999,11 @@ def create_email_agent(config_path: str | Path = DEFAULT_CONFIG_PATH) -> EmailAg
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     config_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 and sys.argv[1].endswith(".yaml") else DEFAULT_CONFIG_PATH
-    instruction = " ".join(sys.argv[2:] if len(sys.argv) > 1 and sys.argv[1].endswith(".yaml") else sys.argv[1:]).strip()
+    keywords = " ".join(sys.argv[2:] if len(sys.argv) > 1 and sys.argv[1].endswith(".yaml") else sys.argv[1:]).strip()
     agent = EmailAgent(config_path=config_path)
-    if not instruction:
-        instruction = "\u5e2e\u6211\u770b\u770b\u6709\u6ca1\u6709\u5b9e\u4e60\u62db\u8058\u76f8\u5173\u90ae\u4ef6"
-    print(json.dumps(agent.ask(instruction=instruction, mail_scope="unread"), ensure_ascii=False, indent=2))
+    if not keywords:
+        keywords = "\u5e2e\u6211\u770b\u770b\u6709\u6ca1\u6709\u5b9e\u4e60\u62db\u8058\u76f8\u5173\u90ae\u4ef6"
+    print(json.dumps(agent.ask(keywords=keywords, mail_scope="unread"), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

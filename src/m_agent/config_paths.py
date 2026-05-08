@@ -44,7 +44,6 @@ EXAMPLE_WEATHER_PROMPT_CONFIG_PATH = PROMPTS_EXAMPLES_DIR / "quick_start.yaml"
 QA_LLM_JUDGE_PROMPT_CONFIG_PATH = PROMPTS_EVALUATION_DIR / "qa_llm_judge.yaml"
 
 NEO4J_CONFIG_PATH = INTEGRATIONS_CONFIG_DIR / "neo4j.yaml"
-EMAIL_CONFIG_PATH = INTEGRATIONS_CONFIG_DIR / "email.yaml"
 
 
 def resolve_config_path(path: str | Path) -> Path:

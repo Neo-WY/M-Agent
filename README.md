@@ -1,110 +1,161 @@
 # M-Agent
 
-### **M-Agent: A Multi-Dimensional Memory Agent for Long-Term Dialogue Question Answering**
+**M-Agent** is a **memory-centric** agent framework for **personal information life**.
+![pipeline_img](docs/M-Agent.png)
 
-M-Agent is an **Agent-Memory** system for **Long-Term Dialogue QA**, designed to address semantic mismatch issues that standard RAG pipelines often face in memory retrieval.
 
-In long-horizon dialogue memory, user questions are often **abstract, cross-temporal, and reasoning-heavy**, while raw evidence is usually **local and concrete text fragments**.
-This semantic-level gap between **query** and **evidence** makes pure embedding-similarity retrieval unreliable.
 
-M-Agent introduces **Retrieval Target Decomposition** and **Multi-Dimensional Memory Retrieval**, building a scalable memory retrieval system so the agent can invoke the right retrieval tools for different question types and improve answer accuracy.
 
-![pipeline_img](docs/pipeline_img.png)
-Figure 1. Comparison between direct embedding retrieval and the M-Agent retrieval framework.
-Left: directly embedding the question can cause incorrect recalls or fail to find valid evidence for multi-entity or abstract-relation questions.
-Right: M-Agent first decomposes the question into sub-questions, retrieves evidence through six semantic labels (Entity, Feature, Action, Time, Reason-Result, Theme), and then analyzes recalled episodes to produce the final answer.
+## How to Run
+### Server side
+- **Run the agent as a service (FastAPI + SSE)**: create a run, subscribe to its event stream, fetch the final result, and maintain thread-level conversation state.
+### Client side
+- **M-Agent-UI**: the simplest information-interaction surface **[available now]**
+- **M-Agent-desktop**: a desktop-form personal assistant
 
 ---
-### **TODO**
-Current refactor direction:
-1. System input has switched from `kg_candidates` to `episodes`.
-2. `Episode -> Scene -> Atomic facts` is generated inside `MemoryCore`.
-3. `persistence` layer is removed; `KGBase` now executes entity/relation operations directly on local Neo4j.
+
+## Repository Layout
+
+Core source code lives under `src/m_agent/`, runnable entry scripts under `scripts/`, automated tests under `tests/`, examples under `examples/`, and experimental integrations under `experiments/`. Configuration lives under `config/`, while runtime artifacts mostly land in `data/` and `log/`.
+
+For a fuller directory layout and design conventions, see: **[docs/project-structure.md](docs/project-structure.md)**.
+
 ---
-### **Project Layout**
 
-Core source code now lives under `src/m_agent/`, runnable entry scripts live under `scripts/`, automated tests live under `tests/`, examples live under `examples/`, and experimental integrations live under `experiments/`.
+## Requirements
 
-For a fuller tree and rationale, see `docs/project-structure.md`.
+- **Python**: `>= 3.10` (see `pyproject.toml`)
+- **Neo4j (optional)**: required when graph storage / entity-relation features are enabled (install separately and ensure connection settings match the project)
+- **LLM / Embedding / Rerank**: configured via `.env` and YAML files under `config/`, supporting OpenAI-compatible providers, Alibaba Cloud (DashScope), etc. (see below)
+
 ---
-### **Quick_start**
 
-The following steps only cover the path from zero to running `run_eval_locomo.py`.
+## Installation
 
-1. Enter the project root and create a virtual environment
+From the project root:
 
-```bash
-# Windows PowerShell
+```powershell
+# Windows PowerShell example
 python -m venv .venv
 .\.venv\Scripts\activate
-
-# macOS / Linux
-# python3 -m venv .venv
-# source .venv/bin/activate
-```
-
-2. Install dependencies
-
-```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-3. Create `.env` in the project root and fill the fields below
+Editable install (recommended for local development):
+
+```bash
+pip install -e .
+```
+
+---
+
+## Environment Variables (`.env`)
+
+Create a `.env` file in the project root and fill in keys / base URLs as needed. Common entries are listed below (defer to in-repo config comments for the source of truth):
 
 ```dotenv
-# MemoryCore LLM: src/m_agent/load_model/OpenAIcall.py
-# Fill one of API_SECRET_KEY or OPENAI_API_KEY
+# MemoryCore LLM (e.g. src/m_agent/load_model/OpenAIcall.py)
+# Fill in either API_SECRET_KEY or OPENAI_API_KEY
 API_SECRET_KEY=YOUR_OPENAI_COMPATIBLE_KEY
 OPENAI_API_KEY=
 BASE_URL=https://api.openai.com/v1
 
-# Agent model: LoCoMo defaults to gpt-4o-mini (see config/agents/memory/locomo_eval_memory_agent.yaml). For OpenAI-compatible chat, set API_SECRET_KEY or OPENAI_API_KEY and BASE_URL (MemoryAgent maps these to OPENAI_* for LangChain). For DeepSeek as agent model, set DEEPSEEK_API_KEY and matching BASE_URL.
+# Agent model (LoCoMo defaults may point to gpt-4o-mini etc.;
+# MemoryAgent will map keys to the OPENAI_* variables LangChain expects)
 DEEPSEEK_API_KEY=YOUR_DEEPSEEK_KEY
 
-# Embedding key: embed_provider (config/memory/core/*.yaml)
+# Embedding (embed_provider, see config/memory/core/*.yaml)
 ALIBABA_API_KEY=YOUR_ALIBABA_KEY
 ALIBABA_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ALIBABA_EMBED_MODEL=text-embedding-v4
-# Rerank: qwen3-rerank HTTP fallback uses compatible-api/v1/reranks; for Singapore set ALIBABA_RERANK_COMPAT_URL=https://dashscope-intl.aliyuncs.com/compatible-api/v1/reranks
+# Rerank: compatible-API example; for the Singapore region switch to dashscope-intl
 
-# Optional switches (keep consistent with current repo defaults)
+# Optional switches (keep aligned with current repo defaults)
 LANGUAGE=zh
 EMBED_PROVIDER=aliyun
 LLM_PROVIDER=deepseek
 ```
 
-4. Run LoCoMo preprocessing first (config-driven, conv_id aligned)
+---
 
-Edit `config/eval/memory_agent/locomo/test_env.yaml` first:
-- `selection.conv_ids` (which conversations to build/test)
-- `import.process_id` (workflow id)
-- `eval.test_id`
+## Usage 1: Chat API as a Long-Running Backend (FastAPI)
 
-Then run:
+The repo ships an HTTP / SSE chat service built on **fixed startup-time config + thread-level session state** (i.e. *not* the "send full config with every request" pattern).
 
-```bash
-python scripts/run_locomo/import_locomo.py --env-config config/eval/memory_agent/locomo/test_env.yaml
+Startup example (PowerShell):
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m m_agent.api.chat_api `
+  --host 127.0.0.1 `
+  --port 8777 `
+  --config config/agents/chat/chat_controller.yaml `
+  --idle-flush-seconds 1800 `
+  --history-max-rounds 12 `
+  --schedule-beat-seconds 10 `
+  --schedule-busy-retry-seconds 5 `
+  --users-db config/users/users.json `
+  --session-ttl-seconds 43200
 ```
 
-After preprocessing, these folders will be generated/updated under `data/memory/<process_id>/`:
+Once running:
 
-- `dialogues/`
-- `episodes/`
-- `scene/` (generated later by MemoryCore import from `episodes/`)
+- Swagger UI: `http://127.0.0.1:8777/docs`
+- OpenAPI JSON: `http://127.0.0.1:8777/openapi.json`
 
-5. Run LoCoMo evaluation (same env config)
+Full API reference, authentication, thread events and schedule details: **[docs/chat_api/README.md](docs/chat_api/README.md)**.
+
+
+
+## Episodic Memory System (Workspace-Mem)
+
+**Workspace-Mem** is an in-house, evidence-driven memory system. It supports **memory reasoning at varying intensities** and **fusion of evidence from heterogeneous sources**, allowing the agent to operate over multiple memory stores with different origins and structures simultaneously. With precise recall and analysis over episodic information, it can handle the kind of intricate, entity-level questions that arise in real-world scenarios.
+
+![pipeline_img](docs/pipeline_img_zh.png)
+**Figure 1.** Overview of the Workspace-Mem retrieval framework. *(figure currently labeled in Chinese; an English version is on the way)*
+
+The memory system is still under active development. The current implementation already shows competitive performance on the pure-episodic benchmark **LoCoMo**:
+
+![LOCOMO_eval_img](docs/LOCOMO_eval_zh.png)
+**Figure 2.** Side-by-side comparison of Workspace-Mem on LoCoMo. *(figure currently labeled in Chinese; an English version is on the way)*
+
+Benchmarks and results in more complex input / understanding settings will be released soon — stay tuned.
+
+For implementation details and engineering conventions (e.g. how `episodes → scene → atomic facts` are generated, and how data directories are organized), start here:
+
+- **[scripts/run_locomo/README.md](scripts/run_locomo/README.md)** (config-driven workflow and data directory layout)
+- **[docs/project-structure.md](docs/project-structure.md)** (code / scripts / path conventions)
+
+---
+
+
+## Tests
 
 ```bash
-python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/test_env.yaml
+pytest
 ```
 
-6. Check outputs
+For markers and policy, see `[tool.pytest.ini_options]` in `pyproject.toml`.
 
-- `log/<test-id>/locomo10_agent_qa.json`
-- `log/<test-id>/locomo10_agent_qa_stats.json`
-- `log/<test-id>/locomo10_agent_qa_run.log`
-- `log/<test-id>/locomo10_agent_qa_qa_trace.jsonl`
+---
 
-Each QA item may also store `memory_agent_prediction_plan` (the internal
-question-plan metadata) alongside predictions and evidence fields.
+## Documentation Index
+
+| Document | Content |
+| --- | --- |
+| [docs/project-structure.md](docs/project-structure.md) | Directory conventions and common commands |
+| [scripts/run_locomo/README.md](scripts/run_locomo/README.md) | LoCoMo configuration and per-script reference |
+| [docs/chat_api/README.md](docs/chat_api/README.md) | Full Chat API reference |
+| [tools/M-Agent-UI/API.md](tools/M-Agent-UI/API.md) | Frontend integration API |
+
+---
+
+## License
+
+This project is released under the **MIT License**. See the root [LICENSE](LICENSE) file for details.
+
+---
+
+**中文 README:** [README-zh.md](README-zh.md)
