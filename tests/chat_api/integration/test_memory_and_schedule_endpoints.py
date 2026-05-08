@@ -35,7 +35,12 @@ def test_thread_memory_mode_and_flush_flow() -> None:
 
         state_before = client.get("/v1/chat/threads/memory-thread/memory/state")
         assert state_before.status_code == 200
-        assert state_before.json()["pending_rounds"] == 1
+        body = state_before.json()
+        assert body["pending_rounds"] == 1
+        wm = body.get("working_memory")
+        assert isinstance(wm, dict)
+        assert "entries" in wm
+        assert isinstance(wm["entries"], list)
 
         switched = client.post(
             "/v1/chat/threads/memory-thread/memory/mode",

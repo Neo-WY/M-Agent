@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from m_agent.chat.simple_chat_agent import SimpleMemoryChatAgent, create_simple_memory_chat_agent
+from m_agent.chat.working_memory import (
+    append_tool_history_to_working_memory,
+    build_working_memory_api_payload,
+    format_working_memory_prompt,
+)
 
 from .chat_api_shared import (
     _get_thread_lock,
@@ -63,6 +68,7 @@ class ThreadSessionState:
     last_flush_reason: Optional[str] = None
     last_flush_result: Optional[Dict[str, Any]] = None
     flush_count: int = 0
+    working_memory_entries: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ChatServiceRuntime:
@@ -238,6 +244,7 @@ class ChatServiceRuntime:
         ]
         history_preview = history_rounds_data[-3:]
 
+        wm_cfg = self.agent.chat_controller.working_memory_config
         return {
             "thread_id": session.thread_id,
             "mode": session.mode,
@@ -255,6 +262,7 @@ class ChatServiceRuntime:
             "idle_flush_deadline": idle_deadline_at,
             "history_rounds_data": history_rounds_data,
             "history_preview": history_preview,
+            "working_memory": build_working_memory_api_payload(session.working_memory_entries, wm_cfg),
         }
 
     def get_thread_state(self, thread_id: str) -> Dict[str, Any]:
@@ -288,6 +296,12 @@ class ChatServiceRuntime:
         session = self._get_or_create_thread(active_thread_id)
         with self._threads_lock:
             history_messages = self._build_history_messages(session)
+            wm_cfg = self.agent.chat_controller.working_memory_config
+            wm_prompt = format_working_memory_prompt(
+                session.working_memory_entries,
+                wm_cfg,
+                prompt_language=self.agent.chat_controller.prompt_language,
+            )
 
         with self._stats_lock:
             self._runs_started += 1
@@ -299,11 +313,17 @@ class ChatServiceRuntime:
                 thread_id=active_thread_id,
                 history_messages=history_messages,
                 persist_memory=False,
+                working_memory_prompt=wm_prompt or None,
             )
 
         answer_text = str(result.get("answer", "") or "").strip()
         agent_result = result.get("agent_result") if isinstance(result.get("agent_result"), dict) else None
         with self._threads_lock:
+            append_tool_history_to_working_memory(
+                session.working_memory_entries,
+                agent_result.get("controller_tool_history") if isinstance(agent_result, dict) else None,
+                wm_cfg,
+            )
             self._append_round(
                 session,
                 user_message=message,
@@ -370,6 +390,12 @@ class ChatServiceRuntime:
         session = self._get_or_create_thread(active_thread_id)
         with self._threads_lock:
             history_messages = self._build_history_messages(session)
+            wm_cfg = self.agent.chat_controller.working_memory_config
+            wm_prompt = format_working_memory_prompt(
+                session.working_memory_entries,
+                wm_cfg,
+                prompt_language=self.agent.chat_controller.prompt_language,
+            )
 
         schedule_prompt = self._schedule_prompt(schedule_item)
         system_context = self._schedule_system_context(schedule_item)
@@ -381,11 +407,17 @@ class ChatServiceRuntime:
                 persist_memory=False,
                 source="schedule",
                 system_context=system_context,
+                working_memory_prompt=wm_prompt or None,
             )
 
         answer_text = str(result.get("answer", "") or "").strip()
         agent_result = result.get("agent_result") if isinstance(result.get("agent_result"), dict) else None
         with self._threads_lock:
+            append_tool_history_to_working_memory(
+                session.working_memory_entries,
+                agent_result.get("controller_tool_history") if isinstance(agent_result, dict) else None,
+                wm_cfg,
+            )
             self._append_round(
                 session,
                 user_message=schedule_prompt,

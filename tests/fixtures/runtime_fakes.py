@@ -281,6 +281,14 @@ class FakeRuntime:
                 "idle_flush_deadline": None,
                 "history_rounds_data": [],
                 "history_preview": [],
+                "working_memory": {
+                    "enabled": False,
+                    "stored_entries": 0,
+                    "inject_max_entries": 20,
+                    "max_stored_entries": 200,
+                    "ui_expose_max_entries": 200,
+                    "entries": [],
+                },
             }
             self._threads[normalized] = state
         return state

@@ -6,13 +6,18 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from m_agent.agents.chat_controller_agent import (
     DEFAULT_CHAT_CONFIG_PATH,
     ChatControllerAgent,
 )
 from m_agent.memory.build_memory.filter_episode import save_eligibility, save_episode_situation
+from m_agent.memory.build_memory.build_episode import (
+    build_episode_structure,
+    load_prompts,
+    segment_dialogue_with_buffer,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -120,15 +125,15 @@ class ChatMemoryPersistence:
             dialogue_file = self._dialogue_file_path(dialogue_payload)
             episode_file = self._episode_file_path(dialogue_id)
             turn_count = len(dialogue_payload.get("turns", []))
-            episode_payload = self._build_episode_payload(
-                dialogue_id=dialogue_id,
-                topic=self._build_episode_topic(normalized_rounds),
-                generated_at=created_at,
-                turn_span=[0, max(turn_count - 1, 0)],
+            episode_payload, episode_build_source = self._resolve_episode_payload_for_dialogue(
+                dialogue_payload=dialogue_payload,
+                normalized_rounds=normalized_rounds,
+                created_at=created_at,
             )
+            episode_ids = self._episode_ids_from_payload(episode_payload)
             eligibility_results = [
                 {
-                    "episode_id": "ep_001",
+                    "episode_id": eid,
                     "dialogue_id": dialogue_id,
                     "eligible": True,
                     "reason": str(reason or "chat_thread_flush"),
@@ -139,6 +144,7 @@ class ChatMemoryPersistence:
                     "factual_novelty": 2,
                     "emotional_novelty": 1,
                 }
+                for eid in episode_ids
             ]
             eligibility_file = episode_file.parent / "eligibility_v1.json"
             episode_situation_file = self.episodes_dir / "episode_situation.json"
@@ -175,7 +181,9 @@ class ChatMemoryPersistence:
                     "workflow_id": self.workflow_id,
                     "memory_root": str(self.memory_root),
                     "dialogue_id": dialogue_id,
-                    "episode_id": "ep_001",
+                    "episode_id": episode_ids[0],
+                    "episode_ids": list(episode_ids),
+                    "episode_build_source": episode_build_source,
                     "round_count": len(normalized_rounds),
                     "turn_count": turn_count,
                     "dialogue_file": str(dialogue_file),
@@ -192,7 +200,9 @@ class ChatMemoryPersistence:
                     "workflow_id": self.workflow_id,
                     "memory_root": str(self.memory_root),
                     "dialogue_id": dialogue_id,
-                    "episode_id": "ep_001",
+                    "episode_id": episode_ids[0],
+                    "episode_ids": list(episode_ids),
+                    "episode_build_source": episode_build_source,
                     "round_count": len(normalized_rounds),
                     "turn_count": turn_count,
                     "dialogue_file": str(dialogue_file),
@@ -202,6 +212,69 @@ class ChatMemoryPersistence:
                     "import_result": None,
                     "error": str(exc),
                 }
+
+    def _episode_ids_from_payload(self, episode_payload: Dict[str, Any]) -> List[str]:
+        raw_eps = episode_payload.get("episodes")
+        if not isinstance(raw_eps, list):
+            return ["ep_001"]
+        out: List[str] = []
+        for ep in raw_eps:
+            if not isinstance(ep, dict):
+                continue
+            eid = str(ep.get("episode_id", "") or "").strip()
+            if eid:
+                out.append(eid)
+        return out or ["ep_001"]
+
+    def _resolve_episode_payload_for_dialogue(
+        self,
+        *,
+        dialogue_payload: Dict[str, Any],
+        normalized_rounds: List[Dict[str, Any]],
+        created_at: datetime,
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        Build episodes_v1.json the same way as LoCoMo import: dialogue segmentation LLM pipeline
+        (`segment_dialogue_with_buffer` + `build_episode_structure`). Falls back to a minimal single
+        episode when prompts are missing or segmentation fails.
+        """
+        dialogue_id = str(dialogue_payload.get("dialogue_id", "") or "").strip()
+        turn_count = len(dialogue_payload.get("turns", []))
+        fallback = self._build_episode_payload(
+            dialogue_id=dialogue_id,
+            topic=self._build_episode_topic(normalized_rounds),
+            generated_at=created_at,
+            turn_span=[0, max(turn_count - 1, 0)],
+        )
+
+        memory_owner = str(getattr(self.memory_core, "memory_owner_name", "") or "").strip() or "changshengEVA"
+        meta_lang = str(dialogue_payload.get("meta", {}).get("language") or "zh").strip().lower()
+        prompt_language = "zh" if meta_lang.startswith("zh") else "en"
+
+        prompts = load_prompts(memory_owner, prompt_language=prompt_language)
+        if not prompts:
+            logger.warning(
+                "Chat flush: dialogue_segmentation prompts missing; using minimal episode payload for dialogue_id=%s",
+                dialogue_id,
+            )
+            return fallback, "minimal_no_prompts"
+
+        try:
+            segmentation_result = segment_dialogue_with_buffer(dialogue_payload, prompts)
+            episodes = segmentation_result.get("episodes") if isinstance(segmentation_result.get("episodes"), list) else []
+            if not episodes:
+                logger.warning(
+                    "Chat flush: segmentation returned no episodes; using minimal payload for dialogue_id=%s",
+                    dialogue_id,
+                )
+                return fallback, "minimal_empty_segments"
+            return build_episode_structure(dialogue_id, segmentation_result), "locomo_segmentation"
+        except Exception:
+            logger.exception(
+                "Chat flush: segmentation failed; using minimal episode payload for dialogue_id=%s",
+                dialogue_id,
+            )
+            return fallback, "minimal_segmentation_error"
 
     def _normalize_rounds(self, rounds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
@@ -411,6 +484,7 @@ class SimpleMemoryChatAgent:
         persist_memory: Optional[bool] = None,
         source: str = "user",
         system_context: Optional[Dict[str, Any]] = None,
+        working_memory_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("message must be a non-empty string")
@@ -422,6 +496,7 @@ class SimpleMemoryChatAgent:
             history_messages=history_messages,
             source=source,
             system_context=system_context,
+            working_memory_prompt=working_memory_prompt,
         )
         active_thread_id = str(
             controller_result.get("thread_id", thread_id or self.default_thread_id) or self.default_thread_id

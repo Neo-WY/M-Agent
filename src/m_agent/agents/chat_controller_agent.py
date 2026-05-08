@@ -20,6 +20,7 @@ from m_agent.chat.capabilities import (
     build_controller_tools,
     resolve_enabled_controller_capability_names,
 )
+from m_agent.chat.working_memory import normalize_working_memory_config
 from m_agent.config_paths import (
     CHAT_CONTROLLER_RUNTIME_PROMPT_CONFIG_PATH,
     DEFAULT_CHAT_AGENT_CONFIG_PATH,
@@ -77,6 +78,7 @@ class ChatControllerAgent:
         self.tool_defaults = self._load_tool_defaults()
         self.chat_persona_prompt = self._load_chat_persona_prompt()
         self.chat_system_prompt = self._build_chat_system_prompt()
+        self.working_memory_config = normalize_working_memory_config(self.config.get("working_memory"))
 
     @staticmethod
     def _load_config(path: Path) -> Dict[str, Any]:
@@ -546,6 +548,7 @@ class ChatControllerAgent:
         history_messages: Optional[List[Dict[str, Any]]] = None,
         source: str = "user",
         system_context: Optional[Dict[str, Any]] = None,
+        working_memory_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("message must be a non-empty string")
@@ -555,10 +558,13 @@ class ChatControllerAgent:
         normalized_history = self._normalize_history_messages(history_messages)
         recall_state: Dict[str, Any] = {"mode": None, "result": None, "history": []}
         controller_state: Dict[str, Any] = {"history": [], "call_seq": 0}
-        extra_system_prompt = self._build_runtime_system_prompt(
+        runtime_extra = self._build_runtime_system_prompt(
             source=source,
             system_context=system_context,
         )
+        wm_extra = str(working_memory_prompt or "").strip()
+        prompt_segments = [seg for seg in (runtime_extra.strip(), wm_extra) if seg]
+        extra_system_prompt = "\n\n".join(prompt_segments).strip()
         controller = self._build_chat_controller(
             active_thread_id=active_thread_id,
             recall_state=recall_state,

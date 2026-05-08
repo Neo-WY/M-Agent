@@ -38,3 +38,19 @@ tool_defaults:
     limit: 10
   email_ask:
     mail_scope: "unread"
+
+# Cross-turn working memory: appended per controller tool call; injected into system prompt (tail only).
+# Does not affect LT flush.
+working_memory:
+  enable: true
+  inject_max_entries: 20
+  max_stored_entries: 200
+  max_question_chars: 512
+  max_answer_chars: 1200
+  max_email_ask_items: 20
+  max_subject_chars: 120
+  max_email_body_excerpt_chars: 1500
+  max_schedule_summary_chars: 400
+  record_time_tool: true
+  # How many WM entries (tail) to embed in thread_state for UI (GET .../memory/state, SSE).
+  ui_expose_max_entries: 200
