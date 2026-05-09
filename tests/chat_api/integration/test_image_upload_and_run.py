@@ -69,7 +69,7 @@ def test_create_run_with_attachment_keeps_blip_caption_in_thread_state() -> None
                     {
                         "upload_id": "img_test_1",
                         "image_url": "/v1/chat/uploads/images/img_test_1/content",
-                        "image_file": "data/chat_uploads/anonymous/2026-05/img_test_1.png",
+                        "image_file": "data/memory/user_anonymous/uploads/images/2026-05/img_test_1.png",
                         "blip_caption": "a cat sits on a sofa",
                     }
                 ],
@@ -105,7 +105,7 @@ def test_build_dialogue_payload_keeps_structured_turn_fields() -> None:
                 "speaker": "User",
                 "text": "look at this",
                 "img_url": "/v1/chat/uploads/images/img_test/content",
-                "img_file": "data/chat_uploads/user/2026-05/img_test.png",
+                "img_file": "data/memory/user_user/uploads/images/2026-05/img_test.png",
                 "blip_caption": "a cat sits on a sofa",
             },
             "assistant_turn": {

@@ -40,6 +40,11 @@ class ChatImageStore:
         self.max_size_bytes = max(1, int(max_size_bytes))
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
+    def _user_upload_dir(self, *, username: Optional[str], month_key: str) -> Path:
+        user_key = _safe_segment(username, fallback="anonymous")
+        user_dir = self.root_dir / f"user_{user_key}"
+        return user_dir / "uploads" / "images" / month_key
+
     def save_upload(
         self,
         *,
@@ -65,8 +70,7 @@ class ChatImageStore:
 
         upload_id = f"img_{uuid.uuid4().hex}"
         month_key = datetime.now(timezone.utc).strftime("%Y-%m")
-        user_key = _safe_segment(username, fallback="anonymous")
-        save_dir = self.root_dir / user_key / month_key
+        save_dir = self._user_upload_dir(username=username, month_key=month_key)
         save_dir.mkdir(parents=True, exist_ok=True)
 
         image_path = save_dir / f"{upload_id}{extension}"

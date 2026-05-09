@@ -252,7 +252,7 @@ def create_app(
 ) -> FastAPI:
     wire_runtime_event_sink(service_runtime)
     image_store = ChatImageStore(
-        root_dir=PROJECT_ROOT / "data" / "chat_uploads",
+        root_dir=PROJECT_ROOT / "data" / "memory",
         captioner=_build_image_captioner_from_env(),
     )
     schedule_heartbeat = ScheduleHeartbeatCoordinator(
