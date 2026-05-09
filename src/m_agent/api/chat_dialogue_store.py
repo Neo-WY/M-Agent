@@ -60,14 +60,23 @@ def _normalize_turns(raw_turns: Any) -> List[Dict[str, Any]]:
     for idx, item in enumerate(raw_turns):
         if not isinstance(item, dict):
             continue
-        turns.append(
-            {
-                "turn_id": int(item.get("turn_id", idx)),
-                "speaker": str(item.get("speaker", "") or "").strip(),
-                "text": str(item.get("text", "") or ""),
-                "timestamp": str(item.get("timestamp", "") or "").strip() or None,
-            }
-        )
+        normalized: Dict[str, Any] = {
+            "turn_id": int(item.get("turn_id", idx)),
+            "speaker": str(item.get("speaker", "") or "").strip(),
+            "text": str(item.get("text", "") or ""),
+            "timestamp": str(item.get("timestamp", "") or "").strip() or None,
+        }
+        # Keep multimodal / extra fields when present (e.g. LoCoMo blip captions or chat image metadata).
+        cap = item.get("blip_caption")
+        if isinstance(cap, str) and cap.strip():
+            normalized["blip_caption"] = cap.strip()
+        img_url = item.get("img_url")
+        if isinstance(img_url, str) and img_url.strip():
+            normalized["img_url"] = img_url.strip()
+        img_file = item.get("img_file")
+        if isinstance(img_file, str) and img_file.strip():
+            normalized["img_file"] = img_file.strip()
+        turns.append(normalized)
     return turns
 
 

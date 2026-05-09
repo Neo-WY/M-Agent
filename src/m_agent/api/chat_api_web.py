@@ -3,20 +3,22 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from m_agent.api.user_access import AuthenticatedUser, UserAccessError, UserAccessService
 from m_agent.paths import PROJECT_ROOT
 
 from .chat_api_models import (
     ChatRunCreateRequest,
+    ChatImageAttachment,
     ScheduleCreateRequest,
     ScheduleUpdateRequest,
     ThreadMemoryFlushRequest,
@@ -25,6 +27,8 @@ from .chat_api_models import (
     UserLoginRequest,
     UserRegisterRequest,
 )
+from .chat_image_captioner import ChatImageCaptioner
+from .chat_image_store import ChatImageStore
 from .chat_dialogue_store import get_dialogue_detail, list_dialogues
 from .chat_api_protocol import _should_protocol_log_path, protocol_logger
 from .chat_api_records import (
@@ -169,6 +173,76 @@ def _public_schedule_item(payload: Dict[str, Any], *, owner_id: str) -> Dict[str
     return result
 
 
+def _attachment_to_payload(attachment: ChatImageAttachment) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for field_name in ("upload_id", "image_url", "image_file", "blip_caption", "mime_type"):
+        value = getattr(attachment, field_name, None)
+        if isinstance(value, str) and value.strip():
+            payload[field_name] = value.strip()
+    if isinstance(getattr(attachment, "width", None), int):
+        payload["width"] = int(attachment.width)
+    if isinstance(getattr(attachment, "height", None), int):
+        payload["height"] = int(attachment.height)
+    return payload
+
+
+def _build_user_turn_payload(*, message: str, attachments: list[ChatImageAttachment] | None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "text": str(message or "").strip(),
+    }
+    first = attachments[0] if attachments else None
+    if first is not None:
+        payload.update(_attachment_to_payload(first))
+        if "image_url" in payload and "img_url" not in payload:
+            payload["img_url"] = payload["image_url"]
+        if "image_file" in payload and "img_file" not in payload:
+            payload["img_file"] = payload["image_file"]
+    return payload
+
+
+def _truthy_env(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _build_image_captioner_from_env() -> ChatImageCaptioner:
+    provider = str(os.getenv("CHAT_IMAGE_CAPTION_PROVIDER", "openai")).strip().lower() or "openai"
+    enabled = _truthy_env("CHAT_IMAGE_CAPTION_ENABLED", True)
+    model_name = str(
+        os.getenv("CHAT_IMAGE_CAPTION_MODEL_NAME", "Salesforce/blip-image-captioning-base")
+    ).strip() or "Salesforce/blip-image-captioning-base"
+    device = str(os.getenv("CHAT_IMAGE_CAPTION_DEVICE", "")).strip() or None
+    openai_model = str(os.getenv("CHAT_IMAGE_CAPTION_OPENAI_MODEL", "")).strip() or None
+    openai_api_key = str(os.getenv("CHAT_IMAGE_CAPTION_OPENAI_API_KEY", "")).strip() or None
+    openai_base_url = str(os.getenv("CHAT_IMAGE_CAPTION_OPENAI_BASE_URL", "")).strip() or None
+    api_url = str(os.getenv("CHAT_IMAGE_CAPTION_API_URL", "")).strip() or None
+    api_auth_token = str(os.getenv("CHAT_IMAGE_CAPTION_API_TOKEN", "")).strip() or None
+    api_auth_header = str(os.getenv("CHAT_IMAGE_CAPTION_API_AUTH_HEADER", "Authorization")).strip() or "Authorization"
+    api_caption_field = str(os.getenv("CHAT_IMAGE_CAPTION_API_FIELD", "blip_caption")).strip() or "blip_caption"
+    api_mode = str(os.getenv("CHAT_IMAGE_CAPTION_API_MODE", "multipart")).strip().lower() or "multipart"
+    try:
+        api_timeout_seconds = float(str(os.getenv("CHAT_IMAGE_CAPTION_API_TIMEOUT_SECONDS", "30")).strip() or "30")
+    except Exception:
+        api_timeout_seconds = 30.0
+    return ChatImageCaptioner(
+        enabled=enabled,
+        provider=provider,
+        model_name=model_name,
+        device=device,
+        openai_model=openai_model,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+        api_url=api_url,
+        api_timeout_seconds=api_timeout_seconds,
+        api_auth_token=api_auth_token,
+        api_auth_header=api_auth_header,
+        api_caption_field=api_caption_field,
+        api_mode=api_mode,
+    )
+
+
 def create_app(
     *,
     service_runtime: ChatServiceRuntime,
@@ -177,6 +251,10 @@ def create_app(
     schedule_busy_retry_seconds: int = 5,
 ) -> FastAPI:
     wire_runtime_event_sink(service_runtime)
+    image_store = ChatImageStore(
+        root_dir=PROJECT_ROOT / "data" / "chat_uploads",
+        captioner=_build_image_captioner_from_env(),
+    )
     schedule_heartbeat = ScheduleHeartbeatCoordinator(
         service_runtime=service_runtime,
         user_access=user_access,
@@ -199,6 +277,7 @@ def create_app(
     app.state.service_runtime = service_runtime
     app.state.user_access = user_access
     app.state.schedule_heartbeat = schedule_heartbeat
+    app.state.image_store = image_store
 
     app.add_middleware(
         CORSMiddleware,
@@ -429,6 +508,54 @@ def create_app(
             return _error_response(status_code=exc.status_code, message=str(exc))
         return JSONResponse(content=payload)
 
+    @app.post("/v1/chat/uploads/images", response_model=None)
+    async def upload_chat_image(
+        request: Request,
+        file: UploadFile = File(...),
+        thread_id: Optional[str] = Form(default=None),
+    ) -> JSONResponse | FileResponse:
+        user, _, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        if file is None:
+            return _error_response(status_code=400, message="image file is required")
+        try:
+            content = await file.read()
+            metadata = image_store.save_upload(
+                content=content,
+                content_type=str(file.content_type or "").strip(),
+                original_filename=str(file.filename or "").strip(),
+                username=user.username if user is not None else None,
+                thread_id=_runtime_thread_id(user, str(thread_id or "").strip()) if thread_id else None,
+            )
+        except ValueError as exc:
+            return _error_response(status_code=400, message=str(exc))
+        except RuntimeError as exc:
+            return _error_response(status_code=503, message=str(exc))
+        except Exception as exc:
+            return _error_response(status_code=500, message=f"failed to store image upload: {exc}")
+        return JSONResponse(content=metadata)
+
+    @app.get("/v1/chat/uploads/images/{upload_id}/content", response_model=None)
+    def get_chat_image_content(upload_id: str, request: Request) -> JSONResponse | FileResponse:
+        user, _, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        metadata = image_store.get_upload_metadata(upload_id)
+        if not isinstance(metadata, dict):
+            return _error_response(status_code=404, message=f"image upload not found: {upload_id}")
+        owner = str(metadata.get("owner", "") or "").strip() or None
+        if user_access is not None and owner and (user is None or user.username != owner):
+            return _error_response(status_code=404, message=f"image upload not found: {upload_id}")
+        image_file = str(metadata.get("image_file", "") or "").strip()
+        if not image_file:
+            return _error_response(status_code=404, message=f"image file missing: {upload_id}")
+        path = Path(image_file)
+        if not path.exists() or not path.is_file():
+            return _error_response(status_code=404, message=f"image file missing: {upload_id}")
+        media_type = str(metadata.get("mime_type", "") or "").strip() or None
+        return FileResponse(path=str(path), media_type=media_type)
+
     @app.post("/v1/chat/runs")
     def create_run(body: ChatRunCreateRequest, request: Request) -> JSONResponse:
         user, active_runtime, auth_error = _resolve_user_and_runtime(request)
@@ -449,12 +576,15 @@ def create_app(
         message = str(body.message or "").strip()
         if not message:
             return JSONResponse(status_code=400, content={"error": "message is empty"})
+        attachments = list(body.attachments or [])
+        user_turn = _build_user_turn_payload(message=message, attachments=attachments)
 
         record = _start_chat_run(
             service_runtime=active_runtime,
             thread_id=thread_id,
             internal_thread_id=runtime_thread_id,
             message=message,
+            user_turn=user_turn,
             user_id=user.username if user is not None else None,
         )
         return JSONResponse(status_code=201, content=_json_response_payload(record))

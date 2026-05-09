@@ -190,6 +190,17 @@ def _turns_to_dialogue_block(turns: List[Dict[str, Any]]) -> str:
         speaker = str(turn.get("speaker", "Unknown"))
         text = str(turn.get("text", ""))
         lines.append(_normalize_dialogue_line(speaker, text))
+        cap = turn.get("blip_caption")
+        if isinstance(cap, str) and cap.strip():
+            img_url = str(turn.get("img_url", "") or "").strip()
+            img_file = str(turn.get("img_file", "") or "").strip()
+            suffix_parts: List[str] = []
+            if img_url:
+                suffix_parts.append(f"url={img_url}")
+            if img_file:
+                suffix_parts.append(f"file={img_file}")
+            suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+            lines.append(f"  [Image: {cap.strip()}]{suffix}")
     return "\n".join(lines).strip()
 
 
