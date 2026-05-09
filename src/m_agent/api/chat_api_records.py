@@ -121,6 +121,7 @@ class ChatRunRecord:
         thread_id: str,
         internal_thread_id: Optional[str] = None,
         message: str,
+        user_turn: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
     ) -> None:
         self.run_id = run_id
@@ -129,6 +130,7 @@ class ChatRunRecord:
         self.internal_thread_id = str(internal_thread_id or thread_id or "").strip() or self.thread_id
         self.user_id = str(user_id or "").strip() or None
         self.message = message
+        self.user_turn = deepcopy(user_turn) if isinstance(user_turn, dict) else None
         self.created_at = _now_iso()
         self.finished_at: Optional[str] = None
         self.status = "queued"
@@ -161,6 +163,7 @@ class ChatRunRecord:
             {
                 "thread_id": self.thread_id,
                 "message": self.message,
+                "user_turn": deepcopy(self.user_turn),
                 "config_path": self.config_path,
                 "user_id": self.user_id,
             },
@@ -244,6 +247,7 @@ class ChatRunRegistry:
         thread_id: str,
         internal_thread_id: Optional[str] = None,
         message: str,
+        user_turn: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
     ) -> ChatRunRecord:
         run_id = f"run_{uuid.uuid4().hex}"
@@ -253,6 +257,7 @@ class ChatRunRegistry:
             thread_id=thread_id,
             internal_thread_id=internal_thread_id,
             message=message,
+            user_turn=user_turn,
             user_id=user_id,
         )
         with self._lock:
@@ -365,6 +370,7 @@ def _run_chat_worker(record: ChatRunRecord, service_runtime: ChatServiceRuntime)
             result = service_runtime.run_chat(
                 message=record.message,
                 thread_id=record.internal_thread_id or service_runtime.default_thread_id,
+                user_turn=deepcopy(record.user_turn) if isinstance(record.user_turn, dict) else None,
             )
 
         public_result = _with_public_result_thread_id(
@@ -408,6 +414,7 @@ def _start_chat_run(
     thread_id: str,
     internal_thread_id: Optional[str] = None,
     message: str,
+    user_turn: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None,
 ) -> ChatRunRecord:
     record = _RUNS.create(
@@ -415,6 +422,7 @@ def _start_chat_run(
         thread_id=thread_id,
         internal_thread_id=internal_thread_id,
         message=message,
+        user_turn=user_turn,
         user_id=user_id,
     )
     worker = threading.Thread(target=_run_chat_worker, args=(record, service_runtime), daemon=True)

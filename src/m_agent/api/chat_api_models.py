@@ -5,10 +5,21 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel
 
 
+class ChatImageAttachment(BaseModel):
+    upload_id: Optional[str] = None
+    image_url: Optional[str] = None
+    image_file: Optional[str] = None
+    blip_caption: Optional[str] = None
+    mime_type: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
 class ChatRunCreateRequest(BaseModel):
     thread_id: Optional[str] = None
     message: Optional[str] = None
     config: Optional[str] = None
+    attachments: Optional[list[ChatImageAttachment]] = None
 
 
 class UserRegisterRequest(BaseModel):

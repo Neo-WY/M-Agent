@@ -13,6 +13,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_turn_payload(
+    turn: Optional[Dict[str, Any]],
+    *,
+    speaker: str,
+    text: str,
+) -> Dict[str, Any]:
+    payload = dict(turn) if isinstance(turn, dict) else {}
+    normalized: Dict[str, Any] = {
+        "speaker": _normalize_text(payload.get("speaker")) or speaker,
+        "text": _normalize_text(payload.get("text")) or _normalize_text(text),
+    }
+    for field_name in ("blip_caption", "img_url", "img_file", "upload_id", "mime_type"):
+        value = payload.get(field_name)
+        if isinstance(value, str) and value.strip():
+            normalized[field_name] = value.strip()
+    if isinstance(payload.get("width"), int):
+        normalized["width"] = int(payload["width"])
+    if isinstance(payload.get("height"), int):
+        normalized["height"] = int(payload["height"])
+    return normalized
+
+
 @dataclass
 class FakeScheduleItem:
     schedule_id: str
@@ -342,7 +368,7 @@ class FakeRuntime:
             "error": None,
         }
 
-    def run_chat(self, *, message: str, thread_id: str) -> Dict[str, Any]:
+    def run_chat(self, *, message: str, thread_id: str, user_turn: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._threads_lock:
             state = self._ensure_state(thread_id)
             state["history_rounds"] += 1
@@ -357,6 +383,22 @@ class FakeRuntime:
             else:
                 memory_status = "skipped"
                 memory_reason = "memory mode is off"
+            normalized_user_turn = _normalize_turn_payload(user_turn, speaker="user", text=message)
+            assistant_turn = _normalize_turn_payload(None, speaker="assistant", text=f"echo:{message}")
+            round_payload = {
+                "round_id": f"round_{uuid4().hex[:8]}",
+                "capture_state": "pending" if memory_status == "buffered" else "skipped",
+                "flush_id": None,
+                "source": "user",
+                "user_message": message,
+                "assistant_message": f"echo:{message}",
+                "user_turn": normalized_user_turn,
+                "assistant_turn": assistant_turn,
+                "user_at": _now_iso(),
+                "assistant_at": _now_iso(),
+            }
+            state["history_rounds_data"].append(round_payload)
+            state["history_preview"] = state["history_rounds_data"][-3:]
             snapshot = deepcopy(state)
         answer = f"echo:{message}"
         return {

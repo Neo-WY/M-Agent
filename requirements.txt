@@ -20,7 +20,11 @@ ipywidgets
 openai
 sentence-transformers
 fastapi
+python-multipart
 uvicorn
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+Pillow
+transformers
+torch

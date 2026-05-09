@@ -308,6 +308,8 @@ class ChatMemoryPersistence:
                 {
                     "user_message": user_message,
                     "assistant_message": assistant_message,
+                    "user_turn": dict(item.get("user_turn")) if isinstance(item.get("user_turn"), dict) else None,
+                    "assistant_turn": dict(item.get("assistant_turn")) if isinstance(item.get("assistant_turn"), dict) else None,
                     "user_at": user_dt,
                     "assistant_at": assistant_dt,
                     "agent_result": item.get("agent_result") if isinstance(item.get("agent_result"), dict) else None,
@@ -348,23 +350,33 @@ class ChatMemoryPersistence:
         turns: List[Dict[str, Any]] = []
         turn_id = 0
         for round_item in rounds:
-            turns.append(
-                {
-                    "turn_id": turn_id,
+            user_turn = dict(round_item.get("user_turn")) if isinstance(round_item.get("user_turn"), dict) else {}
+            if not user_turn:
+                user_turn = {
                     "speaker": self.user_name,
                     "text": round_item["user_message"],
-                    "timestamp": _to_utc_iso(round_item["user_at"]),
                 }
-            )
+            user_turn["turn_id"] = turn_id
+            user_turn["speaker"] = str(user_turn.get("speaker", self.user_name) or self.user_name)
+            user_turn["text"] = str(user_turn.get("text", round_item["user_message"]) or round_item["user_message"])
+            user_turn["timestamp"] = _to_utc_iso(round_item["user_at"])
+            turns.append(user_turn)
             turn_id += 1
-            turns.append(
-                {
-                    "turn_id": turn_id,
+            assistant_turn = (
+                dict(round_item.get("assistant_turn")) if isinstance(round_item.get("assistant_turn"), dict) else {}
+            )
+            if not assistant_turn:
+                assistant_turn = {
                     "speaker": self.assistant_name,
                     "text": round_item["assistant_message"],
-                    "timestamp": _to_utc_iso(round_item["assistant_at"]),
                 }
+            assistant_turn["turn_id"] = turn_id
+            assistant_turn["speaker"] = str(assistant_turn.get("speaker", self.assistant_name) or self.assistant_name)
+            assistant_turn["text"] = str(
+                assistant_turn.get("text", round_item["assistant_message"]) or round_item["assistant_message"]
             )
+            assistant_turn["timestamp"] = _to_utc_iso(round_item["assistant_at"])
+            turns.append(assistant_turn)
             turn_id += 1
 
         return {

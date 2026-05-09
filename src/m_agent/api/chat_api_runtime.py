@@ -30,11 +30,65 @@ logger = logging.getLogger(__name__)
 ThreadEventSink = Optional[Callable[[str, str, Dict[str, Any]], Any]]
 
 
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_turn_payload(
+    turn: Optional[Dict[str, Any]],
+    *,
+    fallback_speaker: str,
+    fallback_text: str,
+) -> Dict[str, Any]:
+    payload = dict(turn) if isinstance(turn, dict) else {}
+    speaker = _normalize_text(payload.get("speaker")) or fallback_speaker
+    text = _normalize_text(payload.get("text")) or _normalize_text(fallback_text)
+    normalized: Dict[str, Any] = {
+        "speaker": speaker,
+        "text": text,
+    }
+    cap = payload.get("blip_caption")
+    if isinstance(cap, str) and cap.strip():
+        normalized["blip_caption"] = cap.strip()
+    img_url = payload.get("img_url")
+    if isinstance(img_url, str) and img_url.strip():
+        normalized["img_url"] = img_url.strip()
+    img_file = payload.get("img_file")
+    if isinstance(img_file, str) and img_file.strip():
+        normalized["img_file"] = img_file.strip()
+    upload_id = payload.get("upload_id")
+    if isinstance(upload_id, str) and upload_id.strip():
+        normalized["upload_id"] = upload_id.strip()
+    mime_type = payload.get("mime_type")
+    if isinstance(mime_type, str) and mime_type.strip():
+        normalized["mime_type"] = mime_type.strip()
+    width = payload.get("width")
+    if isinstance(width, int):
+        normalized["width"] = width
+    height = payload.get("height")
+    if isinstance(height, int):
+        normalized["height"] = height
+    return normalized
+
+
+def _render_turn_for_llm(turn: Optional[Dict[str, Any]]) -> str:
+    payload = turn if isinstance(turn, dict) else {}
+    text = _normalize_text(payload.get("text"))
+    cap = _normalize_text(payload.get("blip_caption"))
+    if text and cap:
+        return f"{text}\n[Image: {cap}]"
+    if cap:
+        return f"[Image: {cap}]"
+    return text
+
+
 @dataclass
 class BufferedRound:
     round_id: str
     user_message: str
     assistant_message: str
+    user_turn: Dict[str, Any]
+    assistant_turn: Dict[str, Any]
     user_at: datetime
     assistant_at: datetime
     agent_result: Optional[Dict[str, Any]]
@@ -44,10 +98,10 @@ class BufferedRound:
 
     def to_history_messages(self) -> List[Dict[str, str]]:
         if self.source == "schedule":
-            return [{"role": "assistant", "content": self.assistant_message}]
+            return [{"role": "assistant", "content": _render_turn_for_llm(self.assistant_turn)}]
         return [
-            {"role": "user", "content": self.user_message},
-            {"role": "assistant", "content": self.assistant_message},
+            {"role": "user", "content": _render_turn_for_llm(self.user_turn)},
+            {"role": "assistant", "content": _render_turn_for_llm(self.assistant_turn)},
         ]
 
     @property
@@ -191,6 +245,8 @@ class ChatServiceRuntime:
         user_message: str,
         assistant_message: str,
         agent_result: Optional[Dict[str, Any]],
+        user_turn: Optional[Dict[str, Any]] = None,
+        assistant_turn: Optional[Dict[str, Any]] = None,
         source: str = "user",
         capture_state_override: Optional[str] = None,
     ) -> BufferedRound:
@@ -202,8 +258,19 @@ class ChatServiceRuntime:
         )
         round_item = BufferedRound(
             round_id=f"round_{uuid.uuid4().hex}",
-            user_message=str(user_message or "").strip(),
-            assistant_message=str(assistant_message or "").strip(),
+            user_message=_normalize_text(user_message),
+            assistant_message=_normalize_text(assistant_message),
+            user_turn=_normalize_turn_payload(
+                user_turn,
+                fallback_speaker=str(getattr(self.agent, "user_name", "user") or "user").strip() or "user",
+                fallback_text=user_message,
+            ),
+            assistant_turn=_normalize_turn_payload(
+                assistant_turn,
+                fallback_speaker=str(getattr(self.agent, "assistant_name", "assistant") or "assistant").strip()
+                or "assistant",
+                fallback_text=assistant_message,
+            ),
             user_at=user_at,
             assistant_at=assistant_at,
             agent_result=deepcopy(agent_result) if isinstance(agent_result, dict) else None,
@@ -228,6 +295,8 @@ class ChatServiceRuntime:
             "flush_id": item.flush_id,
             "user_message": item.user_message,
             "assistant_message": item.assistant_message,
+            "user_turn": deepcopy(item.user_turn),
+            "assistant_turn": deepcopy(item.assistant_turn),
             "user_at": _to_iso(item.user_at),
             "assistant_at": _to_iso(item.assistant_at),
         }
@@ -291,7 +360,13 @@ class ChatServiceRuntime:
             "thread_state": snapshot,
         }
 
-    def run_chat(self, *, message: str, thread_id: str) -> Dict[str, Any]:
+    def run_chat(
+        self,
+        *,
+        message: str,
+        thread_id: str,
+        user_turn: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         active_thread_id = str(thread_id or self.default_thread_id).strip() or self.default_thread_id
         session = self._get_or_create_thread(active_thread_id)
         with self._threads_lock:
@@ -307,9 +382,16 @@ class ChatServiceRuntime:
             self._runs_started += 1
             self._last_run_started_at = _now_iso()
 
+        normalized_user_turn = _normalize_turn_payload(
+            user_turn,
+            fallback_speaker=str(getattr(self.agent, "user_name", "user") or "user").strip() or "user",
+            fallback_text=message,
+        )
+        rendered_message = _render_turn_for_llm(normalized_user_turn)
+
         with self._operation_lock:
             result = self.agent.chat(
-                message=message,
+                message=rendered_message,
                 thread_id=active_thread_id,
                 history_messages=history_messages,
                 persist_memory=False,
@@ -318,6 +400,10 @@ class ChatServiceRuntime:
 
         answer_text = str(result.get("answer", "") or "").strip()
         agent_result = result.get("agent_result") if isinstance(result.get("agent_result"), dict) else None
+        assistant_turn = {
+            "speaker": str(getattr(self.agent, "assistant_name", "assistant") or "assistant").strip() or "assistant",
+            "text": answer_text,
+        }
         with self._threads_lock:
             append_tool_history_to_working_memory(
                 session.working_memory_entries,
@@ -326,9 +412,11 @@ class ChatServiceRuntime:
             )
             self._append_round(
                 session,
-                user_message=message,
+                user_message=normalized_user_turn.get("text", rendered_message),
                 assistant_message=answer_text,
                 agent_result=agent_result,
+                user_turn=normalized_user_turn,
+                assistant_turn=assistant_turn,
                 source="user",
             )
             thread_state = self._thread_state_snapshot(session)
@@ -412,6 +500,14 @@ class ChatServiceRuntime:
 
         answer_text = str(result.get("answer", "") or "").strip()
         agent_result = result.get("agent_result") if isinstance(result.get("agent_result"), dict) else None
+        schedule_user_turn = {
+            "speaker": str(getattr(self.agent, "user_name", "user") or "user").strip() or "user",
+            "text": schedule_prompt,
+        }
+        schedule_assistant_turn = {
+            "speaker": str(getattr(self.agent, "assistant_name", "assistant") or "assistant").strip() or "assistant",
+            "text": answer_text,
+        }
         with self._threads_lock:
             append_tool_history_to_working_memory(
                 session.working_memory_entries,
@@ -423,6 +519,8 @@ class ChatServiceRuntime:
                 user_message=schedule_prompt,
                 assistant_message=answer_text,
                 agent_result=agent_result,
+                user_turn=schedule_user_turn,
+                assistant_turn=schedule_assistant_turn,
                 source="schedule",
                 capture_state_override="skipped",
             )
@@ -505,6 +603,8 @@ class ChatServiceRuntime:
             {
                 "user_message": item.user_message,
                 "assistant_message": item.assistant_message,
+                "user_turn": deepcopy(item.user_turn),
+                "assistant_turn": deepcopy(item.assistant_turn),
                 "user_at": item.user_at,
                 "assistant_at": item.assistant_at,
                 "agent_result": item.agent_result,

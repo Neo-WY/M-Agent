@@ -343,9 +343,27 @@ def _format_segment_conversation_text(segment_buffer: List[Dict[str, Any]]) -> s
             continue
         speaker = str(turn.get("speaker", "User") or "User").strip()
         text = str(turn.get("text", "") or "").strip()
-        if not text:
+        cap = turn.get("blip_caption")
+        cap_text = str(cap).strip() if isinstance(cap, str) else ""
+        img_url = str(turn.get("img_url", "") or "").strip()
+        img_file = str(turn.get("img_file", "") or "").strip()
+
+        if text:
+            lines.append(f"{speaker}: {text}")
+        elif cap_text:
+            # Keep a stable speaker line even when the turn has no text.
+            lines.append(f"{speaker}:")
+        else:
             continue
-        lines.append(f"{speaker}: {text}")
+
+        if cap_text:
+            suffix_parts: List[str] = []
+            if img_url:
+                suffix_parts.append(f"url={img_url}")
+            if img_file:
+                suffix_parts.append(f"file={img_file}")
+            suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+            lines.append(f"  [Image: {cap_text}]{suffix}")
     return "\n".join(lines).strip()
 
 
