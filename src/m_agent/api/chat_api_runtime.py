@@ -412,7 +412,7 @@ class ChatServiceRuntime:
             )
             self._append_round(
                 session,
-                user_message=normalized_user_turn.get("text", rendered_message),
+                user_message=_normalize_text(normalized_user_turn.get("text")) or rendered_message,
                 assistant_message=answer_text,
                 agent_result=agent_result,
                 user_turn=normalized_user_turn,

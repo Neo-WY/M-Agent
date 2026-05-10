@@ -200,6 +200,12 @@ def _build_user_turn_payload(*, message: str, attachments: list[ChatImageAttachm
     return payload
 
 
+def _has_effective_attachment(attachments: list[ChatImageAttachment] | None) -> bool:
+    if not attachments:
+        return False
+    return any(bool(_attachment_to_payload(item)) for item in attachments)
+
+
 def _truthy_env(name: str, default: bool) -> bool:
     raw = str(os.getenv(name, "")).strip().lower()
     if not raw:
@@ -573,10 +579,10 @@ def create_app(
 
         thread_id = str(body.thread_id or active_runtime.default_thread_id).strip() or active_runtime.default_thread_id
         runtime_thread_id = _runtime_thread_id(user, thread_id)
-        message = str(body.message or "").strip()
-        if not message:
-            return JSONResponse(status_code=400, content={"error": "message is empty"})
         attachments = list(body.attachments or [])
+        message = str(body.message or "").strip()
+        if not message and not _has_effective_attachment(attachments):
+            return JSONResponse(status_code=400, content={"error": "message and attachments are both empty"})
         user_turn = _build_user_turn_payload(message=message, attachments=attachments)
 
         record = _start_chat_run(
