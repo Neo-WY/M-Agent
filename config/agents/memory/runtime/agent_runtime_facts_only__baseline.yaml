@@ -116,146 +116,6 @@ memory_agent:
         INSUFFICIENT with a targeted next_query. If one purchase is split across snippets, do
         not drop the snippet that only states the count or only the total.
 
-  workspace_direct_judge_prompt:
-    zh: |
-      你是记忆问答系统的“Judge 驱动”检索控制器。
-      你不需要输出 SUFFICIENT/INSUFFICIENT/INVALID，也不需要绑定证据 ID。
-      你的任务是：根据【原始问题】与【当前工作区证据】总结当前已知的关键信息，并决定：
-      - 现在是否已经足以回答问题：若足够，直接给出 answer；
-      - 若仍不足，给出下一轮检索的 next_query。
-
-      【原始问题】
-      <original_question>
-
-      【当前检索查询】
-      <cur_query>
-
-      【Useful Information So Far｜direct 模式跨轮累积（若非「尚无」，须与下方证据核对并在 useful_information 中合并更新）】
-      <useful_information_so_far>
-
-      【工作区证据（全部保留项，仅供你阅读，不要求引用证据编号）】
-      <workspace_evidence_summary>
-
-      仅返回 JSON：
-      {
-        "useful_information": "在整合上方「累积摘要」（若非「尚无」）与本工作区证据后，写出更新后的整体已知信息与缺口（尽量具体）。",
-        "answer": "若已足够回答则填写最终答案，否则为 null",
-        "next_query": "若还需检索则给出下一轮检索 query，否则为 null"
-      }
-
-      规则：
-      - 任何结论仍须可被下方工作区证据支持；累积摘要仅供参考，不能与证据冲突时覆盖证据。
-      - answer 与 next_query 只能有一个不为空。
-      - 若 answer 不为 null，则 next_query 必须为 null。
-      - 若 answer 为 null，则 next_query 必须为一个具体、可执行的检索查询（指向缺失信息）。
-    en: |
-      You are a judge-driven retrieval controller for a memory QA system.
-      You do NOT output SUFFICIENT/INSUFFICIENT/INVALID and you do NOT bind to evidence ids.
-      Your job: summarize currently known useful information for answering the question,
-      then decide either to answer now or to provide a next retrieval query.
-
-      [Original Question]
-      <original_question>
-
-      [Current Retrieval Query]
-      <cur_query>
-
-      [Useful Information So Far]
-      This is cumulative state from prior direct-judge rounds. If it shows "(none yet)", base useful_information only on workspace evidence below.
-      Otherwise merge honestly with workspace evidence—your conclusions must remain supportable by the evidence text.
-
-      <useful_information_so_far>
-
-      [Workspace Evidence (all kept, for reading only; do not cite ids)]
-      <workspace_evidence_summary>
-
-      Return JSON only:
-      {
-        "useful_information": "After merging the block above with workspace evidence, write an updated cumulative summary (include gaps).",
-        "answer": "If sufficient, provide the final answer; otherwise null.",
-        "next_query": "If insufficient, provide the next retrieval query; otherwise null."
-      }
-
-      Rules:
-      - Do not contradict the workspace evidence; the cumulative block is a convenience summary, not a source of facts.
-      - Exactly one of answer / next_query must be non-empty.
-      - If answer is non-null, next_query must be null.
-      - If answer is null, next_query must be a concrete, actionable retrieval query targeting missing info.
-
-  workspace_direct_judge_prompt_final:
-    zh: |
-      你是记忆问答系统的“Judge 驱动”检索控制器。
-      **这是最后一轮（final round）**，不能再发起下一轮检索。
-
-      你的任务是：
-      1) 简要总结当前已知信息（useful_information 可稍长）；
-      2) **必须给出一个可被评测的短答案**（answer），除非工作区证据完全无关/为空。
-
-      【原始问题】
-      <original_question>
-
-      【当前检索查询】
-      <cur_query>
-
-      【Useful Information So Far｜direct 模式跨轮累积（若非「尚无」，须与下方证据核对并在 useful_information 中合并更新）】
-      <useful_information_so_far>
-
-      【工作区证据（全部保留项，仅供你阅读，不要求引用证据编号）】
-      <workspace_evidence_summary>
-
-      仅返回 JSON：
-      {
-        "useful_information": "在整合上方「累积摘要」（若非「尚无」）与本工作区证据后，写出更新后的整体已知信息与缺口（可简短）。",
-        "answer": "基于现有证据给出最好的**短答案**；只有在证据完全无关/为空时才为 null",
-        "next_query": null
-      }
-
-      规则：
-      - 任何结论仍须可被下方工作区证据支持；累积摘要仅供参考，不能与证据冲突时覆盖证据。
-      - next_query 必须为 null。
-      - answer 若不为 null，必须是短答案（不写分析）：
-        - 列表题：逗号分隔列举。
-        - 时间/日期题：给出精确日期/时间。
-        - might/based-on 题：允许输出候选集合（如“California or Florida”），不要因为无法唯一定位就拒答。
-      - 若证据不足以给出唯一值，输出“证据支持的最接近答案/候选集合”，不要输出“需要更多信息”。
-    en: |
-      You are a judge-driven retrieval controller for a memory QA system.
-      This is the FINAL round: you must NOT request another retrieval round.
-
-      Your job:
-      1) Briefly summarize what is known (useful_information may include gaps).
-      2) Produce a SHORT, evaluable final answer (answer), unless the workspace evidence is empty or irrelevant.
-
-      [Original Question]
-      <original_question>
-
-      [Current Retrieval Query]
-      <cur_query>
-
-      [Useful Information So Far]
-      Cumulative summary from earlier direct rounds. If "(none yet)", derive useful_information solely from workspace evidence.
-
-      <useful_information_so_far>
-
-      [Workspace Evidence (all kept, for reading only; do not cite ids)]
-      <workspace_evidence_summary>
-
-      Return JSON only:
-      {
-        "useful_information": "Merge prior summary with workspace evidence into an updated brief summary (may include gaps).",
-        "answer": "Provide the BEST possible SHORT, evaluable final answer; use null ONLY if evidence is empty/irrelevant.",
-        "next_query": null
-      }
-
-      Rules:
-      - Ground everything in workspace evidence text; earlier summary is aide-mémoire only.
-      - next_query MUST be null.
-      - If answer is non-null, it MUST be short and directly scorable:
-        - List questions: return a comma-separated list.
-        - Date/day/time: return the exact value if present.
-        - Might/based-on questions: return the supported candidate set (e.g. \"California or Florida\") instead of refusing.
-      - If evidence cannot support a single exact value, output the closest supported answer/candidate set. Do NOT say \"need more information\" in the final answer.
-
   action_plan_prompt:
     zh: |
       你是记忆问答系统的检索规划器。
@@ -398,3 +258,104 @@ memory_agent:
         "gold_answer": "... or null",
         "evidence": "..."
       }
+
+  workspace_direct_evidence_judge_prompt:
+    zh: |
+      你是记忆问答系统的证据充分性评审。
+      你的任务是评估已收集的工作区证据能否回答用户的原始问题，
+      筛选出真正有用的证据，并在需要时引导下一轮检索。
+
+      【原始问题】
+      <original_question>
+
+      【当前检索查询】
+      <cur_query>
+
+      【工作区证据（全部保留项）】
+      <workspace_evidence_summary>
+
+      【证据短编号映射（短编号 -> 真实证据 ID）】
+      <evidence_ref_map_json>
+
+      指令：
+      1. 对照原始问题审查上述所有证据块。
+      2. 选出哪些证据短编号（如 E1/E2/...）对回答问题真正有用。
+         有用的证据是指包含事实、对话或时间信息，
+         能直接支撑回答原始问题任何部分的证据。
+      3. 判定工作区状态：
+         - "SUFFICIENT"：有用证据足以完整回答原始问题。
+         - "INSUFFICIENT"：存在部分有用证据但还需要更多
+           （如多跳推理需要下一步、缺少时间/人物信息、缺少数量/件数/人数导致无法回答「每只/每人/单价/平均」等）。
+           你必须提供 next_query 来引导下一轮检索。
+         - "INVALID"：继续搜索已经不值得
+           （例如多轮检索后仍无明确线索，或问题本身缺乏可检索目标）。
+      4. 先写 reason（简要说明依据与缺口），再写 status 与列表。
+
+      仅返回 JSON（reason 置于首位）：
+      {
+        "reason": "...",
+        "status": "SUFFICIENT" | "INSUFFICIENT" | "INVALID",
+        "useful_evidence_ids": ["E1", "E2", ...],
+        "next_query": "..." 或 null
+      }
+
+      规则：
+      - 当 status 为 "INSUFFICIENT" 时，next_query 为必填项，
+        应是一个针对缺失信息的具体检索查询。
+      - 当 status 为 "SUFFICIENT" 或 "INVALID" 时，next_query 必须为 null。
+      - useful_evidence_ids 可包含之前轮次的证据。
+      - 严格筛选：仅将真正有助于回答问题的证据标为有用，排除明显无关项。若问「每只/每人/单价/均价」，有用证据合起来须能推出单价（可跨条用总价与数量；或证据已直接写明）；缺一则用 INSUFFICIENT 并给出 next_query。同一笔支出拆在多段时，勿丢掉只含数量或总价的那段。
+      - 这里的 "INVALID" 表示“继续搜索已经不值得”，而不是“本轮未产生任何有用证据”。
+    en: |
+      You are an evidence sufficiency judge for a memory QA system.
+      Your job is to evaluate whether the collected workspace evidence can answer
+      the user's original question, select truly useful evidence, and guide the
+      next retrieval round if needed.
+
+      [Original Question]
+      <original_question>
+
+      [Current Retrieval Query]
+      <cur_query>
+
+      [Workspace Evidence (all kept)]
+      <workspace_evidence_summary>
+
+      [Evidence Ref Map (short ref -> real evidence_id)]
+      <evidence_ref_map_json>
+
+      Instructions:
+      1. Review ALL evidence blocks above against the original question.
+      2. Select which short evidence refs (e.g. E1/E2/...) are genuinely useful for answering the question.
+         An evidence is useful if it contains facts, dialogue, or time information
+         that directly supports answering any part of the original question.
+      3. Determine the workspace status:
+         - "SUFFICIENT": the useful evidence is enough to fully answer the original question.
+         - "INSUFFICIENT": some useful evidence exists but more is needed
+           (e.g. multi-hop reasoning requires another step, missing time/person info,
+           missing count/quantity/headcount so per-item or per-person price cannot be answered).
+           You MUST provide a next_query to guide the next retrieval round.
+         - "INVALID": continuing retrieval is no longer worthwhile
+           (for example after repeated searching with no actionable lead, or when the question lacks a retrievable target).
+      4. Write "reason" first (brief: basis and gaps), then status and lists.
+
+      Return JSON only ("reason" first):
+      {
+        "reason": "...",
+        "status": "SUFFICIENT" | "INSUFFICIENT" | "INVALID",
+        "useful_evidence_ids": ["E1", "E2", ...],
+        "next_query": "If insufficient, provide the next retrieval query; otherwise null."
+      }
+
+      Rules:
+      - next_query is REQUIRED when status is "INSUFFICIENT". It should be a
+        specific retrieval query targeting the missing information.
+      - next_query must be null when status is "SUFFICIENT" or "INVALID".
+      - useful_evidence_ids may include evidence from previous rounds.
+      - Be strict: mark evidence useful only when it helps answer the question; drop clearly
+        unrelated items. For per-item, per-person, unit, or average-price questions, the useful
+        set must support a unit price (combine total and count across snippets when needed, or
+        cite an explicit unit price). If a matching divisor or total is missing, use
+        INSUFFICIENT with a targeted next_query. If one purchase is split across snippets, do
+        not drop the snippet that only states the count or only the total.
+      - Here, "INVALID" means continuing retrieval is no longer worthwhile, not that this round produced no useful evidence.

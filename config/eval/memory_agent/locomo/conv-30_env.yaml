@@ -16,16 +16,16 @@ selection:
 
 import:
   process_id: "locomo/conv-30"
-  clean_output: true
+  clean_output: false
   episode_max_workers: 6
 
 warmup:
   scene_max_workers: 6
   scene_fact_max_workers: 6
-  force: true
+  force: false
 
 eval:
-  test_id: new_baseline__conv-30-new
+  test_id: new_baseline__conv-30-direct-blip-adversarial
   memory_agent_config: config/agents/memory/locomo_eval_memory_agent_full_mode_E2.yaml
   model_key: memory_agent
   prediction_key: memory_agent_prediction
@@ -35,6 +35,7 @@ eval:
   sample_seed: 42
   max_samples: 0
   max_questions: 0
+  only_categories: "5"
   save_every: 1
   sleep_seconds: 0.0
   recall_dir: recall

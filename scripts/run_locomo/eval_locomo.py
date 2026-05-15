@@ -105,6 +105,7 @@ def main() -> int:
     sample_seed = int(eval_cfg.get("sample_seed", 42))
     max_samples = int(eval_cfg.get("max_samples", 0))
     max_questions = int(eval_cfg.get("max_questions", 0))
+    only_categories = str(eval_cfg.get("only_categories", "") or "").strip()
     save_every = int(eval_cfg.get("save_every", 1))
     sleep_seconds = float(eval_cfg.get("sleep_seconds", 0.0))
     recall_dir = str(eval_cfg.get("recall_dir", "recall") or "recall").strip() or "recall"
@@ -178,6 +179,8 @@ def main() -> int:
     ]
     if overwrite:
         cmd.append("--overwrite")
+    if only_categories:
+        cmd.extend(["--only-categories", only_categories])
     if question_config_path is not None:
         cmd.extend(["--question-config", str(question_config_path)])
     workflow_id = resolve_locomo_workflow_id(payload, args.workflow_id)

@@ -85,7 +85,8 @@ class Workspace:
     gap_type: Optional[str] = None
     original_question: str = ""
     cur_query: str = ""
-    # Direct judge_mode only: latest cumulative useful_information for cross-round prompts; unused ("") in evidence-driven runs.
+    # Direct judge_mode only: latest cumulative "current known evidence" summary
+    # passed across rounds; unused ("") in evidence-driven runs.
     direct_useful_information: str = ""
     _documents: Dict[str, WorkspaceDocument] = field(default_factory=dict)
     _insert_order: List[str] = field(default_factory=list)

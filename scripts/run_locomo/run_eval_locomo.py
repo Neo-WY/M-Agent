@@ -50,6 +50,7 @@ STATS_FILE_NAME = "locomo10_agent_qa_stats.json"
 RUN_LOG_FILE_NAME = "locomo10_agent_qa_run.log"
 TRACE_FILE_NAME = "locomo10_agent_qa_qa_trace.jsonl"
 SKIPPED_QA_CATEGORIES = {5}
+INCLUDED_QA_CATEGORIES: set[int] | None = None
 EVAL_CATEGORY_ORDER = [4, 1, 2, 3]
 LOCOMO_SOURCE_QA_INDEX_KEY = "_locomo_source_qa_index"
 EVIDENCE_DIALOG_REF_PATTERN = re.compile(r"D\d+:\d+")
@@ -131,6 +132,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Optional cap on total number of questions to evaluate (0 means all).",
+    )
+    parser.add_argument(
+        "--only-categories",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated LoCoMo QA categories to evaluate, for example "
+            "'5' or '1,2'. When set, only these categories are evaluated and this "
+            "overrides the default skip of category 5."
+        ),
     )
     parser.add_argument(
         "--save-every",
@@ -431,7 +442,37 @@ def _get_qa_category(qa: Dict[str, Any]) -> int:
 
 
 def should_evaluate_qa(qa: Dict[str, Any]) -> bool:
-    return _get_qa_category(qa) not in SKIPPED_QA_CATEGORIES
+    cat = _get_qa_category(qa)
+    if INCLUDED_QA_CATEGORIES is not None:
+        return cat in INCLUDED_QA_CATEGORIES
+    return cat not in SKIPPED_QA_CATEGORIES
+
+
+def _parse_category_filter(raw_value: str) -> set[int] | None:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return None
+
+    out: set[int] = set()
+    for token in raw.split(","):
+        value = token.strip()
+        if not value:
+            continue
+        try:
+            out.add(int(value))
+        except Exception as exc:
+            raise ValueError(f"Invalid category in --only-categories: {value!r}") from exc
+
+    return out or None
+
+
+def _eval_category_order() -> List[int]:
+    if INCLUDED_QA_CATEGORIES is None:
+        return list(EVAL_CATEGORY_ORDER)
+
+    preferred = [cat for cat in EVAL_CATEGORY_ORDER if cat in INCLUDED_QA_CATEGORIES]
+    extras = sorted(cat for cat in INCLUDED_QA_CATEGORIES if cat not in preferred)
+    return preferred + extras
 
 
 def _build_output_paths(test_id: str) -> Dict[str, str]:
@@ -929,6 +970,16 @@ def _get_final_answer_episode_refs(qa: Dict[str, Any], prediction_key: str) -> L
     return _extract_episode_refs(qa.get(prediction_key + "_evidence_episode_refs"))
 
 
+def _get_final_answer_segment_refs(qa: Dict[str, Any], prediction_key: str) -> List[str]:
+    # Strict final-answer recall (segment mode): prefer exact segment refs explicitly
+    # attached to the final answer. Fall back to the legacy field because older runs
+    # persisted segment refs under *_evidence_episode_refs before they were normalized.
+    refs = _extract_segment_refs(qa.get(prediction_key + "_evidence_segment_refs"))
+    if refs:
+        return refs
+    return _extract_segment_refs(qa.get(prediction_key + "_evidence_episode_refs"))
+
+
 def _get_workspace_execute_episode_refs(qa: Dict[str, Any], prediction_key: str) -> List[str]:
     refs = _extract_episode_refs_from_workspace_segment_refs(
         qa.get(prediction_key + "_workspace_execute_segment_refs")
@@ -1326,13 +1377,13 @@ def eval_question_answering_locomo(
         all_b1_scores.append(b1)
 
         evidence_refs = _extract_dialogue_refs_from_evidence(qa.get("evidence", []))
-        final_answer_episode_refs = _get_final_answer_episode_refs(qa, prediction_key)
-        recall_acc = _compute_recall_from_episode_refs(
-            episode_refs=final_answer_episode_refs,
+        final_answer_segment_refs = _get_final_answer_segment_refs(qa, prediction_key)
+        recall_acc = _compute_recall_from_segment_refs(
+            segment_refs=final_answer_segment_refs,
             evidence_refs=evidence_refs,
             episodes_root=episodes_root,
-            episode_ref_cache=episode_ref_cache,
-            dialogue_episode_spans_cache=dialogue_episode_spans_cache,
+            segment_ref_cache=segment_ref_cache,
+            dialogue_segment_spans_cache=dialogue_segment_spans_cache,
         )
         if recall_acc is None:
             recall_acc = _compute_recall_from_context(
@@ -1474,7 +1525,7 @@ def analyze_aggr_acc_locomo(
                 context_len_og[context_bin] += 1
                 context_len_counts[context_bin] += score
 
-    keys = EVAL_CATEGORY_ORDER
+    keys = _eval_category_order()
     summary_by_cat = {}
     total_q = 0.0
     total_score = 0.0
@@ -1529,7 +1580,7 @@ def summarize_metric_by_category(
             total_counts[category] += 1
             metric_sums[category] += float(qa.get(metric_key, 0.0))
 
-    keys = EVAL_CATEGORY_ORDER
+    keys = _eval_category_order()
     summary_by_cat = {}
     total_q = 0.0
     total_score = 0.0
@@ -1700,6 +1751,7 @@ def _resolve_locomo_episodes_root_from_agent_config(
 
 
 def main() -> int:
+    global INCLUDED_QA_CATEGORIES
     args = parse_args()
 
     data_file = str(resolve_project_path(args.data_file))
@@ -1724,7 +1776,14 @@ def main() -> int:
     logger.info("recall_root=%s", recall_root)
     if args.overwrite and recall_root.exists():
         shutil.rmtree(recall_root, ignore_errors=True)
-    logger.info("Skipped QA categories: %s", sorted(SKIPPED_QA_CATEGORIES))
+    INCLUDED_QA_CATEGORIES = _parse_category_filter(args.only_categories)
+    if INCLUDED_QA_CATEGORIES is not None:
+        logger.info(
+            "Only-category filter enabled: evaluating categories %s",
+            sorted(INCLUDED_QA_CATEGORIES),
+        )
+    else:
+        logger.info("Skipped QA categories: %s", sorted(SKIPPED_QA_CATEGORIES))
     wf_override = str(args.workflow_id or "").strip()
     episodes_root = _resolve_locomo_episodes_root_from_agent_config(
         config_path,
@@ -1753,6 +1812,7 @@ def main() -> int:
         "sample_seed": args.sample_seed,
         "max_samples": args.max_samples,
         "max_questions": args.max_questions,
+        "only_categories": args.only_categories or "",
         "save_every": args.save_every,
         "sleep_seconds": args.sleep_seconds,
         "recall_dir": str(args.recall_dir or "").strip() or "recall",
@@ -1918,6 +1978,7 @@ def main() -> int:
                 tool_calls: Any = None
                 question_plan: Any = None
                 evidence_episode_refs: List[str] = []
+                evidence_segment_refs: List[str] = []
                 evidence_episode_ref_count = 0
                 workspace_execute_segment_refs = None
                 workspace_execute_episode_refs = None
@@ -1937,9 +1998,9 @@ def main() -> int:
                         evidence = ask_result.get("evidence")
                         tool_calls = ask_result.get("tool_calls", [])
                         question_plan = ask_result.get("question_plan")
-                        evidence_episode_refs = _extract_episode_refs(
-                            ask_result.get("evidence_episode_refs")
-                        )
+                        raw_evidence_refs = ask_result.get("evidence_episode_refs")
+                        evidence_episode_refs = _extract_episode_refs(raw_evidence_refs)
+                        evidence_segment_refs = _extract_segment_refs(raw_evidence_refs)
                         raw_ref_count = ask_result.get("evidence_episode_ref_count")
                         try:
                             evidence_episode_ref_count = int(raw_ref_count)
@@ -1959,6 +2020,7 @@ def main() -> int:
                         qa[args.prediction_key + "_gold_answer"] = pred
                         qa[args.prediction_key + "_evidence"] = evidence
                         qa[args.prediction_key + "_evidence_episode_refs"] = evidence_episode_refs
+                        qa[args.prediction_key + "_evidence_segment_refs"] = evidence_segment_refs
                         qa[args.prediction_key + "_evidence_episode_ref_count"] = (
                             evidence_episode_ref_count
                         )
@@ -2006,6 +2068,7 @@ def main() -> int:
                                 "_gold_answer",
                                 "_evidence",
                                 "_evidence_episode_refs",
+                                "_evidence_segment_refs",
                                 "_evidence_episode_ref_count",
                                 "_workspace_execute_segment_refs",
                                 "_workspace_execute_episode_refs",
@@ -2052,6 +2115,9 @@ def main() -> int:
                     "prediction_evidence": qa.get(args.prediction_key + "_evidence"),
                     "prediction_evidence_episode_refs": qa.get(
                         args.prediction_key + "_evidence_episode_refs"
+                    ),
+                    "prediction_evidence_segment_refs": qa.get(
+                        args.prediction_key + "_evidence_segment_refs"
                     ),
                     "prediction_evidence_episode_ref_count": qa.get(
                         args.prediction_key + "_evidence_episode_ref_count"

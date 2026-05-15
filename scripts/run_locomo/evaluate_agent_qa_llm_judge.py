@@ -62,26 +62,32 @@ def _load_env_file(path: Path) -> None:
 _load_env_file(ENV_PATH)
 
 
+def _load_prompt_pair(config: dict[str, Any], node_name: str, resolved_path: Path) -> tuple[str, str]:
+    prompt_node = config.get(node_name)
+    if not isinstance(prompt_node, dict):
+        raise ValueError(f"`{node_name}` is required in prompt config: {resolved_path}")
+
+    system_prompt = prompt_node.get("system_prompt")
+    user_prompt_template = prompt_node.get("user_prompt_template")
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        raise ValueError(f"`{node_name}.system_prompt` is required in prompt config: {resolved_path}")
+    if not isinstance(user_prompt_template, str) or not user_prompt_template.strip():
+        raise ValueError(f"`{node_name}.user_prompt_template` is required in prompt config: {resolved_path}")
+    return system_prompt.strip(), user_prompt_template.strip()
+
+
 def load_judge_prompts(
     config_path: str | Path,
     prompt_language: str,
-) -> tuple[str, str]:
+) -> tuple[tuple[str, str], tuple[str, str]]:
     resolved_path = resolve_project_path(config_path)
     config = load_resolved_prompt_config(
         resolved_path,
         language=normalize_prompt_language(prompt_language),
     )
-    prompt_node = config.get("qa_llm_judge")
-    if not isinstance(prompt_node, dict):
-        raise ValueError(f"`qa_llm_judge` is required in prompt config: {resolved_path}")
-
-    system_prompt = prompt_node.get("system_prompt")
-    user_prompt_template = prompt_node.get("user_prompt_template")
-    if not isinstance(system_prompt, str) or not system_prompt.strip():
-        raise ValueError(f"`qa_llm_judge.system_prompt` is required in prompt config: {resolved_path}")
-    if not isinstance(user_prompt_template, str) or not user_prompt_template.strip():
-        raise ValueError(f"`qa_llm_judge.user_prompt_template` is required in prompt config: {resolved_path}")
-    return system_prompt.strip(), user_prompt_template.strip()
+    default_pair = _load_prompt_pair(config, "qa_llm_judge", resolved_path)
+    adversarial_pair = _load_prompt_pair(config, "qa_llm_judge_adversarial_cat5", resolved_path)
+    return default_pair, adversarial_pair
 
 
 def parse_args() -> argparse.Namespace:
@@ -141,6 +147,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Extra categories to skip (strings). Category 5 is also skipped by default "
             "(same as run_eval_locomo); use eval.llm_judge_exclude_category_5: false in --env-config to include it."
+        ),
+    )
+    parser.add_argument(
+        "--only-categories",
+        nargs="*",
+        default=[],
+        help=(
+            "Only evaluate these categories. Accepts one or more values such as "
+            "'5' or '1 2'. When set, this overrides the default skip of category 5."
         ),
     )
     parser.add_argument(
@@ -253,6 +268,38 @@ def resolve_excluded_categories(cli_exclude: list[str], env_config: str) -> set[
     if resolve_llm_judge_exclude_category_5(env_config):
         out.add("5")
     return out
+
+
+def _parse_category_tokens(raw_value: Any) -> set[str]:
+    if raw_value is None:
+        return set()
+    if isinstance(raw_value, str):
+        raw_items = [token.strip() for token in raw_value.split(",")]
+    elif isinstance(raw_value, (list, tuple, set)):
+        raw_items = [str(item).strip() for item in raw_value]
+    else:
+        raw_items = [str(raw_value).strip()]
+    return {item for item in raw_items if item}
+
+
+def resolve_included_categories(cli_include: list[str], env_config: str) -> set[str]:
+    out = {str(x).strip() for x in cli_include if str(x).strip()}
+    raw = str(env_config or "").strip()
+    if not raw:
+        return out
+    try:
+        payload, _ = load_env_config(raw)
+    except Exception:
+        return out
+    eval_cfg = payload.get("eval", {})
+    if not isinstance(eval_cfg, dict):
+        return out
+
+    # Prefer a judge-specific field when present; otherwise reuse the main eval filter.
+    env_include = _parse_category_tokens(
+        eval_cfg.get("llm_judge_only_categories", eval_cfg.get("only_categories"))
+    )
+    return out or env_include
 
 
 def _extract_json(content: str) -> str:
@@ -440,6 +487,36 @@ def _mark_evaluated(
     return score
 
 
+def _mark_fixed_evaluated(
+    qa_item: dict[str, Any],
+    judge_prefix: str,
+    *,
+    question: str,
+    gold_answer: str,
+    generated_answer: str,
+    prediction_field_used: str,
+    label: str,
+    reason: str,
+    status: str,
+) -> float:
+    score = 1.0 if str(label).upper() == "CORRECT" else 0.0
+    qa_item[judge_prefix + "_score"] = round(score, 6)
+    qa_item[judge_prefix] = {
+        "status": status,
+        "label": str(label).upper(),
+        "correct_count": int(score),
+        "num_runs": 0,
+        "judgments": {},
+        "question": question,
+        "gold_answer": gold_answer,
+        "generated_answer": generated_answer,
+        "prediction_field_used": prediction_field_used,
+        "reason": reason,
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return score
+
+
 def _mark_error(
     qa_item: dict[str, Any],
     judge_prefix: str,
@@ -470,6 +547,7 @@ def build_tasks(
     primary_field: str,
     fallback_field: str,
     excluded_categories: set[str],
+    included_categories: set[str],
     judge_prefix: str,
     overwrite: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -479,8 +557,10 @@ def build_tasks(
         "total_qa": 0,
         "queued_qa": 0,
         "scored_existing": 0,
+        "skipped_non_target_category": 0,
         "skipped_missing_gold": 0,
         "skipped_missing_prediction": 0,
+        "adversarial_missing_prediction_correct": 0,
         "skipped_excluded_category": 0,
     }
     score_key = judge_prefix + "_score"
@@ -505,6 +585,19 @@ def build_tasks(
                 primary_field,
                 fallback_field,
             )
+
+            if included_categories and category not in included_categories:
+                stats["skipped_non_target_category"] += 1
+                _mark_skipped(
+                    qa_item,
+                    judge_prefix,
+                    "skipped_non_target_category",
+                    question=question,
+                    gold_answer=gold_answer,
+                    generated_answer=generated_answer,
+                    prediction_field_used=prediction_field_used,
+                )
+                continue
 
             if category in excluded_categories:
                 stats["skipped_excluded_category"] += 1
@@ -533,6 +626,20 @@ def build_tasks(
                 continue
 
             if not generated_answer:
+                if category == "5":
+                    stats["adversarial_missing_prediction_correct"] += 1
+                    _mark_fixed_evaluated(
+                        qa_item,
+                        judge_prefix,
+                        question=question,
+                        gold_answer=gold_answer,
+                        generated_answer=generated_answer,
+                        prediction_field_used=prediction_field_used,
+                        label="CORRECT",
+                        reason="Missing prediction is treated as a correct abstention for category-5 adversarial questions.",
+                        status="adversarial_missing_prediction_correct",
+                    )
+                    continue
                 stats["skipped_missing_prediction"] += 1
                 _mark_skipped(
                     qa_item,
@@ -569,6 +676,7 @@ def build_tasks(
                     "gold_answer": gold_answer,
                     "generated_answer": generated_answer,
                     "prediction_field_used": prediction_field_used,
+                    "category": category,
                     "qa_ref": qa_item,
                 }
             )
@@ -585,6 +693,7 @@ def write_locomo_eval_results_jsonl(
     primary_field: str,
     fallback_field: str,
     excluded_categories: set[str],
+    included_categories: set[str],
     judge_model: str,
 ) -> None:
     """One line per QA (sample JSON order), trace_id = sample_id__q<source_idx> (matches run_eval_locomo)."""
@@ -601,6 +710,8 @@ def write_locomo_eval_results_jsonl(
                 if not isinstance(qa_item, dict):
                     continue
                 category = _normalize_category(qa_item.get("category"))
+                if included_categories and category not in included_categories:
+                    continue
                 if category in excluded_categories:
                     continue
                 gold_answer = _pick_gold_answer(qa_item)
@@ -664,11 +775,13 @@ async def judge_once(
 
 async def evaluate_tasks(
     tasks: list[dict[str, Any]],
-    llm: Any,
+    llm_default: Any,
+    llm_adversarial_cat5: Any,
     num_runs: int,
     concurrency: int,
     max_retries: int,
-    user_prompt_template: str,
+    user_prompt_template_default: str,
+    user_prompt_template_adversarial_cat5: str,
 ) -> list[dict[str, Any]]:
     semaphore = asyncio.Semaphore(concurrency)
     completed = 0
@@ -677,6 +790,13 @@ async def evaluate_tasks(
         nonlocal completed
         async with semaphore:
             try:
+                category = str(item.get("category", "") or "")
+                llm = llm_adversarial_cat5 if category == "5" else llm_default
+                user_prompt_template = (
+                    user_prompt_template_adversarial_cat5
+                    if category == "5"
+                    else user_prompt_template_default
+                )
                 judgments = await asyncio.gather(
                     *[
                         judge_once(
@@ -895,7 +1015,10 @@ def update_stats_file(
 async def main() -> None:
     args = parse_args()
     prompt_language = normalize_prompt_language(args.prompt_language)
-    system_prompt, user_prompt_template = load_judge_prompts(
+    (system_prompt, user_prompt_template), (
+        adversarial_system_prompt,
+        adversarial_user_prompt_template,
+    ) = load_judge_prompts(
         args.prompt_config,
         prompt_language,
     )
@@ -922,10 +1045,16 @@ async def main() -> None:
         else f"{model_key}_llm_judge"
     )
     metric_key = judge_prefix + "_score"
+    included_categories = resolve_included_categories(
+        list(args.only_categories or []),
+        str(args.env_config or ""),
+    )
     excluded_categories = resolve_excluded_categories(
         list(args.exclude_categories or []),
         str(args.env_config or ""),
     )
+    if included_categories:
+        excluded_categories -= included_categories
 
     samples = load_samples(input_path)
     tasks, prep_stats = build_tasks(
@@ -933,6 +1062,7 @@ async def main() -> None:
         primary_field=args.prediction_field,
         fallback_field=args.fallback_prediction_field,
         excluded_categories=excluded_categories,
+        included_categories=included_categories,
         judge_prefix=judge_prefix,
         overwrite=args.overwrite,
     )
@@ -944,13 +1074,19 @@ async def main() -> None:
     print("Judge field prefix:", judge_prefix)
     print("Prompt language:", prompt_language)
     print("Prompt config:", resolve_project_path(args.prompt_config))
+    print("Only categories:", sorted(included_categories))
     print("Excluded categories:", sorted(excluded_categories))
     print("Questions loaded:", prep_stats["total_qa"])
     print("Questions queued:", prep_stats["queued_qa"])
     print("Questions reused:", prep_stats["scored_existing"])
+    print("Skipped non-target category:", prep_stats["skipped_non_target_category"])
     print("Skipped excluded category:", prep_stats["skipped_excluded_category"])
     print("Skipped missing gold:", prep_stats["skipped_missing_gold"])
     print("Skipped missing prediction:", prep_stats["skipped_missing_prediction"])
+    print(
+        "Adversarial missing prediction treated correct:",
+        prep_stats["adversarial_missing_prediction_correct"],
+    )
 
     failed_count = 0
     evaluated_new = 0
@@ -975,13 +1111,23 @@ async def main() -> None:
             system_prompt=system_prompt,
             max_tokens=512,
         )
+        llm_adversarial_cat5 = get_chat_llm(
+            model_temperature=0.0,
+            model_name=args.model,
+            api_key_override=args.api_key,
+            base_url_override=args.base_url,
+            system_prompt=adversarial_system_prompt,
+            max_tokens=512,
+        )
         results = await evaluate_tasks(
             tasks=tasks,
-            llm=llm,
+            llm_default=llm,
+            llm_adversarial_cat5=llm_adversarial_cat5,
             num_runs=args.num_runs,
             concurrency=args.concurrency,
             max_retries=args.max_retries,
-            user_prompt_template=user_prompt_template,
+            user_prompt_template_default=user_prompt_template,
+            user_prompt_template_adversarial_cat5=adversarial_user_prompt_template,
         )
         for result in results:
             qa_item = result["task"]["qa_ref"]
@@ -1023,6 +1169,7 @@ async def main() -> None:
         "model_key": model_key,
         "prediction_field": args.prediction_field,
         "fallback_prediction_field": args.fallback_prediction_field,
+        "included_categories": sorted(included_categories),
         "excluded_categories": sorted(excluded_categories),
         "num_runs": args.num_runs,
         "judge_model": args.model,
@@ -1033,6 +1180,8 @@ async def main() -> None:
         "evaluated_new": evaluated_new,
         "failed_qa": failed_count,
         "scored_existing": prep_stats["scored_existing"],
+        "adversarial_missing_prediction_correct": prep_stats["adversarial_missing_prediction_correct"],
+        "skipped_non_target_category": prep_stats["skipped_non_target_category"],
         "skipped_excluded_category": prep_stats["skipped_excluded_category"],
         "skipped_missing_gold": prep_stats["skipped_missing_gold"],
         "skipped_missing_prediction": prep_stats["skipped_missing_prediction"],
@@ -1043,11 +1192,10 @@ async def main() -> None:
     update_stats_file(
         stats_path=stats_output_path,
         out_samples=samples,
-        # Keep stats compatible with existing LoCoMo tooling which expects
-        # per-model keys like "memory_agent" (not per-judge keys like
-        # "memory_agent_llm_judge"). The metric_key still points to the
-        # judge score field (e.g. "memory_agent_llm_judge_score").
-        stats_model_key=model_key,
+        # Write judge aggregates under a dedicated key so we do not overwrite
+        # the original eval metrics stored under "memory_agent"
+        # (including recall / workspace_execute_recall summaries).
+        stats_model_key=judge_prefix,
         metric_key=metric_key,
         metadata=metadata,
         data_file=str(resolve_project_path(args.data_file)),
@@ -1062,6 +1210,7 @@ async def main() -> None:
             primary_field=args.prediction_field,
             fallback_field=args.fallback_prediction_field,
             excluded_categories=excluded_categories,
+            included_categories=included_categories,
             judge_model=str(args.model or "").strip() or "unknown",
         )
         print("Wrote eval jsonl:", resolve_project_path(export_raw))

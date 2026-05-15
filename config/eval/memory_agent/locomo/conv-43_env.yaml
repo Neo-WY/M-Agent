@@ -1,7 +1,7 @@
 # LoCoMo env config for conv-26 only
 # Typical usage:
 #   python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/conv-26_env.yaml
-#   python scripts/run_locomo/run_locomo_pipeline.py --env-config config/eval/memory_agent/locomo/conv-26_env.yaml --batch --test-id-suffix
+#   python scripts/run_locomo/run_locomo_pipeline.py --env-config config/eval/memory_agent/locomo/conv-43_env.yaml --batch --test-id-suffix
 
 name: locomo_conv43_env
 description: Evaluate conv-43 with isolated memory store and fixed test_id.
@@ -16,16 +16,16 @@ selection:
 
 import:
   process_id: "locomo/conv-43"
-  clean_output: true
+  clean_output: false
   episode_max_workers: 6
 
 warmup:
   scene_max_workers: 6
   scene_fact_max_workers: 6
-  force: true
+  force: false
 
 eval:
-  test_id: new_baseline__conv-43-direct
+  test_id: new_baseline__conv-43-direct-blip-adversarial
   memory_agent_config: config/agents/memory/locomo_eval_memory_agent_full_mode_E2.yaml
   model_key: memory_agent
   prediction_key: memory_agent_prediction
@@ -35,6 +35,7 @@ eval:
   sample_seed: 42
   max_samples: 0
   max_questions: 0
+  only_categories: "5"
   save_every: 1
   sleep_seconds: 0.0
   recall_dir: recall

@@ -33,3 +33,66 @@ qa_llm_judge:
 
       Return JSON only:
       {{"label": "CORRECT" or "WRONG"}}
+
+qa_llm_judge_adversarial_cat5:
+  system_prompt:
+    zh: |
+      你是一个对抗样本问答评测器。Category-5 问题是诱导型问题，其中给出的参考答案是“诱导答案/陷阱答案”，不是正确答案。
+      你的任务是判断模型是否成功抵抗了诱导。
+
+      评测原则：
+      1. 如果模型拒答、表示无法判断、表示证据不足，判为 CORRECT。
+      2. 如果模型回答了陷阱答案，或语义上等价于陷阱答案，判为 WRONG。
+      3. 如果模型给出任何其他具体但无支持的答案，也判为 WRONG。
+
+      只返回 JSON。
+    en: |
+      You are an evaluator for adversarial QA.
+      Category-5 questions are adversarial trap questions. The provided reference answer is a trap answer, not a correct gold answer.
+      Your task is to judge whether the model successfully resisted the trap.
+
+      Evaluation principles:
+      1. If the model abstains, refuses to answer, or says the answer cannot be determined, label CORRECT.
+      2. If the model gives the trap answer or a semantically equivalent answer, label WRONG.
+      3. If the model gives any other specific unsupported answer, also label WRONG.
+
+      Return JSON only.
+  user_prompt_template:
+    zh: |
+      请评估下面这个 LoCoMo category-5 对抗问题的回答是否正确。
+
+      [Question]
+      {question}
+
+      [Trap Answer]
+      {gold_answer}
+
+      [Model Response]
+      {generated_answer}
+
+      判定规则：
+      - 如果回答明确拒答、表示无法从记忆/证据确定、或说明信息不足，返回 CORRECT。
+      - 如果回答给出了 Trap Answer 或语义等价内容，返回 WRONG。
+      - 如果回答给出了其他具体答案，也返回 WRONG。
+
+      只返回 JSON：
+      {{"label": "CORRECT" or "WRONG"}}
+    en: |
+      Evaluate the following LoCoMo category-5 adversarial response.
+
+      [Question]
+      {question}
+
+      [Trap Answer]
+      {gold_answer}
+
+      [Model Response]
+      {generated_answer}
+
+      Decision rules:
+      - If the response abstains, refuses to answer, says it cannot be determined, or says the evidence/memory is insufficient, return CORRECT.
+      - If the response gives the Trap Answer or a semantically equivalent answer, return WRONG.
+      - If the response gives any other specific answer, return WRONG.
+
+      Return JSON only:
+      {{"label": "CORRECT" or "WRONG"}}

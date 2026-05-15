@@ -1,10 +1,10 @@
-# LoCoMo env config for conv-50 only
+# LoCoMo env config for conv-48 only
 # Typical usage:
-#   python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/conv-50_env.yaml
-#   python scripts/run_locomo/run_locomo_pipeline.py --env-config config/eval/memory_agent/locomo/conv-50_env.yaml --batch --test-id-suffix
+#   python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/conv-48_env.yaml
+#   python scripts/run_locomo/run_locomo_pipeline.py --env-config config/eval/memory_agent/locomo/conv-48_env.yaml --batch --test-id-suffix
 
-name: locomo_conv50_env
-description: Evaluate conv-50 with isolated memory store and fixed test_id.
+name: locomo_conv48_env
+description: Evaluate conv-48 with isolated memory store and fixed test_id.
 
 data:
   file: data/locomo/data/locomo10.json
@@ -12,10 +12,10 @@ data:
 
 selection:
   conv_ids:
-    - conv-50
+    - conv-48
 
 import:
-  process_id: "locomo/conv-50"
+  process_id: "locomo/conv-48"
   clean_output: false
   episode_max_workers: 6
 
@@ -25,7 +25,7 @@ warmup:
   force: false
 
 eval:
-  test_id: new_baseline__conv-50-direct-blip-adversarial
+  test_id: new_baseline__conv-48-direct-blip-adversarial
   memory_agent_config: config/agents/memory/locomo_eval_memory_agent_full_mode_E2.yaml
   model_key: memory_agent
   prediction_key: memory_agent_prediction
