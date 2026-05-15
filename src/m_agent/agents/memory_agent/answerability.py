@@ -38,35 +38,48 @@ class JudgeDecision(_JudgeDecisionRequired, total=False):
 
 
 # ---------------------------------------------------------------------------
-# Direct judge (no evidence binding)
+# Direct judge (evidence-driven, but without "new evidence refs" control signal)
 # ---------------------------------------------------------------------------
 
-class _DirectJudgeDecisionRequired(TypedDict):
-    useful_information: str
-    answer: str | None
-    next_query: str | None
-
-
-class DirectJudgeDecision(_DirectJudgeDecisionRequired, total=False):
+class DirectJudgeDecision(_JudgeDecisionRequired, total=False):
     parse_failed: bool
 
 
 def llm_judge_direct(
+    workspace: Workspace,
+    new_evidence_ids: List[str],
     *,
+    ref_id_to_evidence_id: Dict[str, str] | None = None,
     llm_func: Callable[[str], Any],
     prompt_text: str,
 ) -> DirectJudgeDecision:
-    """Judge-driven decision without workspace status/evidence binding.
+    """Direct-branch judge using evidence ids, but a different INVALID semantics.
 
     Expected JSON schema:
     {
-      "useful_information": "...",
-      "answer": "..." | null,
+      "reason": "...",
+      "status": "SUFFICIENT" | "INSUFFICIENT" | "INVALID",
+      "useful_evidence_ids": ["E1", "E2", ...],
       "next_query": "..." | null
     }
 
-    Constraint: exactly one of answer / next_query should be non-empty.
+    Differences from ``llm_judge_workspace``:
+    - prompt omits the "new evidence short refs" control signal
+    - ``INVALID`` means "not worth continuing retrieval" rather than merely
+      "this round produced nothing"
+    - the state machine does not apply stagnant-evidence early exit
     """
+    quick = quick_reject(workspace, new_evidence_ids)
+    if quick is not None:
+        return {
+            "status": quick["status"],
+            "useful_evidence_ids": list(quick.get("useful_evidence_ids") or []),
+            "reason": quick["reason"],
+            "next_query": quick.get("next_query"),
+            "gap_type": "not_worth_searching" if quick["status"] == "INVALID" else quick.get("gap_type"),
+            "parse_failed": False,
+        }
+
     raw_response = llm_func(prompt_text)
     response_text = _extract_text(raw_response)
     parsed = _parse_judge_response(response_text)
@@ -80,30 +93,48 @@ def llm_judge_direct(
             _clip_for_log(response_text, _JUDGE_RAW_LOG_MAX_CHARS),
         )
 
-    useful_information = str(parsed.get("useful_information", "") or "").strip()
+    status = str(parsed.get("status", "") or "").strip().upper()
+    if status not in {"SUFFICIENT", "INSUFFICIENT", "INVALID"}:
+        logger.warning("Direct judge returned unexpected status '%s', defaulting to INSUFFICIENT", status)
+        status = "INSUFFICIENT"
 
-    answer_raw = parsed.get("answer")
-    answer = str(answer_raw).strip() if isinstance(answer_raw, str) else None
-    if isinstance(answer, str) and not answer:
-        answer = None
+    useful_ids = parsed.get("useful_evidence_ids", [])
+    if not isinstance(useful_ids, list):
+        useful_ids = []
+    useful_ids = [_normalize_evidence_id(eid) for eid in useful_ids]
+    useful_ids = [eid for eid in useful_ids if eid]
+    if ref_id_to_evidence_id:
+        mapped: List[str] = []
+        for rid in useful_ids:
+            eid = ref_id_to_evidence_id.get(rid)
+            if eid:
+                mapped.append(eid)
+        useful_ids = mapped
 
-    next_query_raw = parsed.get("next_query")
-    next_query = str(next_query_raw).strip() if isinstance(next_query_raw, str) else None
-    if isinstance(next_query, str) and not next_query:
+    reason = str(parsed.get("reason", "") or "").strip() or "Direct judge decision."
+    next_query = parsed.get("next_query")
+    if isinstance(next_query, str):
+        next_query = next_query.strip() or None
+    else:
         next_query = None
 
-    # Enforce mutual exclusion with a conservative fail-safe.
-    if answer and next_query:
-        # Prefer answer (stop condition) and discard next_query.
-        next_query = None
-    elif not answer and not next_query:
-        # If both missing, mark parse_failed so caller can preserve existing cur_query.
+    if status == "INSUFFICIENT" and not next_query:
         parse_failed = True
+    if status in {"SUFFICIENT", "INVALID"} and next_query is not None:
+        next_query = None
+
+    gap_type: str | None = None
+    if status == "INSUFFICIENT":
+        gap_type = "need_more_evidence"
+    elif status == "INVALID":
+        gap_type = "not_worth_searching"
 
     return {
-        "useful_information": useful_information,
-        "answer": answer,
+        "status": status,  # type: ignore[typeddict-item]
+        "useful_evidence_ids": useful_ids,
+        "reason": reason,
         "next_query": next_query,
+        "gap_type": gap_type,
         "parse_failed": parse_failed,
     }
 
