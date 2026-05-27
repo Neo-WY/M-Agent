@@ -1,0 +1,114 @@
+"""Bridge Think-life contracts to layer PerceptionInput / ThinkContext."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from m_agent.layers.perception import PerceptionInput, build_perception_input
+from m_agent.runtime.think_life.contracts import (
+    SceneActor,
+    SceneEntry,
+    SceneEntryType,
+    Stimulus,
+    StimulusKind,
+    TransactionRecord,
+)
+from m_agent.systems.scene.protocols import SceneReader
+
+
+@dataclass
+class ThinkContext:
+    transaction: TransactionRecord
+    stimulus: Stimulus
+    scene_tail: List[SceneEntry]
+
+
+def format_scene_tail(entries: List[SceneEntry], *, max_chars: int = 8000) -> str:
+    if not entries:
+        return ""
+    lines: List[str] = ["[Scene log — chronological, cross-transaction]"]
+    used = 0
+    for entry in entries:
+        line = f"- ({entry.occurred_at}) [{entry.actor.value}/{entry.entry_type.value}] {entry.text}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines)
+
+
+def latest_user_utterance_from_scene(entries: List[SceneEntry]) -> str:
+    """Most recent user utterance in chronological scene tail (for feedback turns)."""
+    for entry in reversed(entries):
+        if entry.actor == SceneActor.USER and entry.entry_type == SceneEntryType.UTTERANCE:
+            text = str(entry.text or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def build_perception_for_stimulus(
+    *,
+    transaction: TransactionRecord,
+    stimulus: Stimulus,
+    scene_reader: SceneReader,
+    scene_context_max_entries: int,
+    history_messages: Optional[List[Dict[str, Any]]] = None,
+) -> PerceptionInput:
+    scene_tail = scene_reader.tail(transaction.thread_id, limit=scene_context_max_entries)
+    pending_user_request = ""
+    if stimulus.kind == StimulusKind.EXECUTION_FEEDBACK:
+        pending_user_request = latest_user_utterance_from_scene(scene_tail)
+    user_message = _stimulus_user_message(
+        stimulus,
+        pending_user_request=pending_user_request,
+    )
+    system_context: Dict[str, Any] = {
+        "think_life": True,
+        "transaction_id": transaction.transaction_id,
+        "stimulus_kind": stimulus.kind.value,
+        "scene_tail_text": format_scene_tail(scene_tail),
+    }
+    if stimulus.kind == StimulusKind.EXECUTION_FEEDBACK:
+        system_context["execution_feedback"] = {
+            "delegate_id": stimulus.delegate_id,
+            "summary": stimulus.payload.get("summary", ""),
+        }
+        if pending_user_request:
+            system_context["pending_user_request"] = pending_user_request
+    source = "user"
+    if stimulus.kind == StimulusKind.HEARTBEAT:
+        source = "schedule"
+    elif stimulus.kind == StimulusKind.EXECUTION_FEEDBACK:
+        source = "execution_feedback"
+
+    return build_perception_input(
+        message=user_message,
+        thread_id=transaction.thread_id,
+        conversation_id=transaction.transaction_id,
+        history_messages=history_messages,
+        source=source,
+        system_context=system_context,
+    )
+
+
+def _stimulus_user_message(
+    stimulus: Stimulus,
+    *,
+    pending_user_request: str = "",
+) -> str:
+    if stimulus.kind == StimulusKind.USER_MESSAGE:
+        return str(stimulus.payload.get("text", "") or "").strip()
+    if stimulus.kind == StimulusKind.HEARTBEAT:
+        return str(stimulus.payload.get("text", "") or stimulus.payload.get("prompt", "") or "").strip()
+    if stimulus.kind == StimulusKind.EXECUTION_FEEDBACK:
+        summary = str(stimulus.payload.get("summary", "") or "").strip()
+        pending = str(pending_user_request or "").strip()
+        parts = ["[Execution feedback] Tools finished for the current request."]
+        if pending:
+            parts.append(f"User request to address: {pending}")
+        if summary:
+            parts.append(f"Execution summary: {summary}")
+        parts.append("Plan the user-facing reply (use answer_directly).")
+        return " ".join(parts)
+    return str(stimulus.payload.get("text", "") or "").strip() or "[stimulus]"

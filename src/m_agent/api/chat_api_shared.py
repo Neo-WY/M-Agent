@@ -3,14 +3,19 @@ from __future__ import annotations
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone
+import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Request
 
-from m_agent.agents.chat_controller_agent import DEFAULT_CHAT_CONFIG_PATH
 from m_agent.api.user_access import AuthenticatedUser
-from m_agent.paths import resolve_project_path
+from m_agent.config_paths import DEFAULT_CHAT_AGENT_CONFIG_PATH as DEFAULT_CHAT_CONFIG_PATH
+from m_agent.paths import (
+    chat_memory_workflow_id,
+    chat_user_dialogues_dir,
+    resolve_project_path,
+)
 
 _THREAD_LOCKS: Dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -189,3 +194,49 @@ def _summarize_memory_write_result(result: Any) -> Dict[str, Any]:
         "scene_build_success": bool(scene_build_result.get("success")) if scene_build_result else None,
         "entity_profile_align_success": bool(align_result.get("success")) if align_result else None,
     }
+
+
+def resolve_dialogues_dir_for_agent(agent: Any) -> Path:
+    """Resolve the directory used by ``GET /v1/chat/dialogues`` for a chat agent."""
+    persistence = getattr(agent, "memory_persistence", None)
+    if persistence is not None:
+        raw_dir = getattr(persistence, "dialogues_dir", None)
+        if raw_dir is not None and str(raw_dir).strip():
+            return Path(raw_dir)
+
+    backend = getattr(getattr(agent, "systems", None), "episodic", None)
+    if backend is not None:
+        backend_persistence = getattr(getattr(backend, "backend", None), "persistence", None)
+        if backend_persistence is not None:
+            raw_dir = getattr(backend_persistence, "dialogues_dir", None)
+            if raw_dir is not None and str(raw_dir).strip():
+                return Path(raw_dir)
+
+    return chat_user_dialogues_dir(str(getattr(agent, "user_name", "") or "default"))
+
+
+def ensure_dialogue_archive(agent: Any) -> Optional[Any]:
+    """Attach a :class:`~m_agent.chat.chat_memory_persistence.ChatDialogueArchive` when missing."""
+    existing = getattr(agent, "memory_persistence", None)
+    if existing is not None:
+        return existing
+    if not bool(getattr(agent, "persist_memory", True)):
+        return None
+
+    cached = getattr(agent, "_dialogue_archive", None)
+    if cached is not None:
+        return cached
+
+    from m_agent.chat.chat_memory_persistence import ChatDialogueArchive
+
+    user_name = str(getattr(agent, "user_name", "") or "default")
+    workflow_id = chat_memory_workflow_id(user_name)
+    archive = ChatDialogueArchive(
+        dialogues_dir=chat_user_dialogues_dir(user_name),
+        user_name=str(getattr(agent, "user_name", "User") or "User"),
+        assistant_name=str(getattr(agent, "assistant_name", "Memory Assistant") or "Memory Assistant"),
+        workflow_id=workflow_id,
+    )
+    agent._dialogue_archive = archive
+    agent.memory_persistence = archive
+    return archive

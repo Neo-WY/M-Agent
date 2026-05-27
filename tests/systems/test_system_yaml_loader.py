@@ -1,0 +1,146 @@
+"""Loader smoke tests for the on-disk ``config/systems/*/*.yaml`` files.
+
+Every system YAML under ``config/systems/`` must:
+
+* parse without raising;
+* produce the corresponding system dataclass;
+* leave its dotted-path plug-ins importable (so a developer adding a new
+  variant cannot silently typo a dotted path).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from m_agent.systems import (
+    EpisodicMemorySystem,
+    ToolSuiteSystem,
+    WMSystem,
+    load_episodic_system,
+    load_tool_suite_system,
+    load_wm_system,
+)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_SYSTEMS_DIR = PROJECT_ROOT / "config" / "systems"
+
+
+# ---------------------------------------------------------------------------
+# WM
+# ---------------------------------------------------------------------------
+
+
+def test_wm_default_yaml_loads_into_wm_system() -> None:
+    path = CONFIG_SYSTEMS_DIR / "wm" / "default.yaml"
+    assert path.exists(), f"missing default wm yaml: {path}"
+    system = load_wm_system(path)
+    assert isinstance(system, WMSystem)
+    assert system.config.enable is True
+
+
+# ---------------------------------------------------------------------------
+# Episodic
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("yaml_name", ["rag_default.yaml"])
+def test_episodic_yaml_parses_and_dotted_paths_import(yaml_name: str) -> None:
+    """Each episodic-system yaml must parse + each plugin path must import."""
+    from m_agent.systems.loader import load_system_yaml, resolve_dotted_path
+
+    path = CONFIG_SYSTEMS_DIR / "episodic" / yaml_name
+    assert path.exists(), f"missing episodic yaml: {path}"
+    payload = load_system_yaml(path, expected_kind="episodic")
+
+    # Recorder dotted path must resolve to a callable.
+    recorder_spec = payload.get("recorder")
+    if isinstance(recorder_spec, dict):
+        recorder_path = recorder_spec.get("path")
+    else:
+        recorder_path = recorder_spec
+    assert isinstance(recorder_path, str) and recorder_path.strip()
+    target = resolve_dotted_path(recorder_path)
+    assert callable(target)
+
+    # Backend dotted path must resolve to a callable. We don't construct
+    # the backend here because it would try to build a MemoryAgent.
+    backend_spec = payload.get("backend")
+    assert isinstance(backend_spec, dict)
+    backend_path = backend_spec.get("path")
+    assert isinstance(backend_path, str) and backend_path.strip()
+    assert callable(resolve_dotted_path(backend_path))
+
+
+def test_episodic_rag_default_yaml_loads() -> None:
+    path = CONFIG_SYSTEMS_DIR / "episodic" / "rag_default.yaml"
+    system = load_episodic_system(path)
+    assert isinstance(system, EpisodicMemorySystem)
+    assert system.query_module.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+def test_tools_default_yaml_loads_and_descriptions_resolved() -> None:
+    path = CONFIG_SYSTEMS_DIR / "tools" / "default.yaml"
+    assert path.exists(), f"missing tools yaml: {path}"
+    system = load_tool_suite_system(path)
+    assert isinstance(system, ToolSuiteSystem)
+    # 8 default tools enabled
+    assert "shallow_recall" in system.enabled
+    assert "email_send" in system.enabled
+    # Per-tool descriptions pulled in from the sibling YAML.
+    assert "shallow_recall" in system.runtime_descriptions
+    assert "deep_recall" in system.runtime_descriptions
+    assert "get_current_time" in system.runtime_descriptions
+
+
+# ---------------------------------------------------------------------------
+# Bundle loader (chat_controller-style entry)
+# ---------------------------------------------------------------------------
+
+
+def test_load_systems_bundle_from_systems_block_resolves_each_pointer() -> None:
+    """The chat_controller's ``systems:`` mapping accepts string paths."""
+    from m_agent.systems import load_systems_bundle_from_config
+
+    chat_controller_dir = PROJECT_ROOT / "config" / "agents" / "chat"
+    bundle = load_systems_bundle_from_config(
+        {
+            "wm": "../../systems/wm/default.yaml",
+            "episodic": "../../systems/episodic/rag_default.yaml",
+            "tools": "../../systems/tools/default.yaml",
+        },
+        config_dir=chat_controller_dir,
+    )
+    assert isinstance(bundle.wm, WMSystem)
+    assert isinstance(bundle.episodic, EpisodicMemorySystem)
+    assert isinstance(bundle.tools, ToolSuiteSystem)
+
+
+def test_load_systems_bundle_accepts_inline_mapping_for_indirection() -> None:
+    """``systems.episodic`` can be an inline dict equivalent to a yaml."""
+    from m_agent.systems import load_systems_bundle_from_config
+
+    bundle = load_systems_bundle_from_config(
+        {
+            "episodic": {
+                "system": "episodic",
+                "recorder": {
+                    "path": "m_agent.systems.episodic.default.recorder:EpisodeRecorderNoop",
+                },
+                "backend": {
+                    "path": "m_agent.systems.episodic.default.rag_backend:SimpleRagEpisodicBackend",
+                    "kwargs": {"embed_model": "hash"},
+                },
+                "query": {"enabled": False},
+            }
+        },
+        config_dir=PROJECT_ROOT / "config" / "agents" / "chat",
+    )
+    assert isinstance(bundle.episodic, EpisodicMemorySystem)
+    assert bundle.episodic.query_module.enabled is False

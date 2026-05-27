@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from m_agent.chat.simple_chat_agent import ChatMemoryPersistence
 from tests.fixtures.app_factory import build_test_app
 from tests.fixtures.payload_builders import run_payload
 
@@ -88,40 +87,3 @@ def test_create_run_with_attachment_keeps_blip_caption_in_thread_state() -> None
         assert round_item["user_turn"]["img_url"] == "/v1/chat/uploads/images/img_test_1/content"
         assert round_item["user_turn"]["img_file"].endswith("img_test_1.png")
 
-
-def test_build_dialogue_payload_keeps_structured_turn_fields() -> None:
-    agent = ChatMemoryPersistence.__new__(ChatMemoryPersistence)
-    agent.user_name = "User"
-    agent.assistant_name = "Assistant"
-
-    rounds = [
-        {
-            "user_message": "look at this",
-            "assistant_message": "nice photo",
-            "user_at": datetime.now(timezone.utc),
-            "assistant_at": datetime.now(timezone.utc),
-            "agent_result": {"tool_call_count": 0},
-            "user_turn": {
-                "speaker": "User",
-                "text": "look at this",
-                "img_url": "/v1/chat/uploads/images/img_test/content",
-                "img_file": "data/memory/user_user/uploads/images/2026-05/img_test.png",
-                "blip_caption": "a cat sits on a sofa",
-            },
-            "assistant_turn": {
-                "speaker": "Assistant",
-                "text": "nice photo",
-            },
-        }
-    ]
-
-    payload = agent._build_dialogue_payload(
-        dialogue_id="dlg_001",
-        thread_id="demo-thread",
-        rounds=rounds,
-        source="chat_api_thread_flush",
-    )
-
-    assert payload["turns"][0]["blip_caption"] == "a cat sits on a sofa"
-    assert payload["turns"][0]["img_url"] == "/v1/chat/uploads/images/img_test/content"
-    assert payload["turns"][0]["img_file"].endswith("img_test.png")

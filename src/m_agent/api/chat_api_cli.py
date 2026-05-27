@@ -8,8 +8,9 @@ from typing import Optional
 
 import uvicorn
 
-from m_agent.agents.chat_controller_agent import DEFAULT_CHAT_CONFIG_PATH
+from m_agent.config_paths import DEFAULT_CHAT_AGENT_CONFIG_PATH as DEFAULT_CHAT_CONFIG_PATH
 from m_agent.api.user_access import AuthenticatedUser, UserAccessService
+from m_agent.paths import ENV_PATH
 
 from .chat_api_protocol import protocol_logger
 from .chat_api_runtime import ChatServiceRuntime
@@ -105,18 +106,33 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable verbose backend/module logs. Default mode keeps only concise HTTP/SSE protocol logs.",
     )
+    parser.add_argument(
+        "--runtime-profile",
+        default="",
+        choices=["", "legacy", "think_life"],
+        help="Override runtime.profile from chat_controller.yaml (legacy | think_life).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if ENV_PATH.exists():
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(dotenv_path=ENV_PATH)
+        except Exception:
+            logger.exception("Failed to load .env from %s", ENV_PATH)
     _configure_windows_event_loop_policy()
     _configure_logging(debug=bool(args.debug))
     config_path = _resolve_config_path(str(args.config or "").strip() or str(DEFAULT_CHAT_CONFIG_PATH))
+    profile_override = str(args.runtime_profile or "").strip().lower() or None
     service_runtime = ChatServiceRuntime(
         config_path=config_path,
         idle_flush_seconds=int(args.idle_flush_seconds),
         history_max_rounds=int(args.history_max_rounds),
+        runtime_profile=profile_override,
     )
     user_access: Optional[UserAccessService] = None
     if not bool(args.disable_auth):
@@ -127,6 +143,7 @@ def main() -> None:
                 config_path=user.config_path,
                 idle_flush_seconds=int(args.idle_flush_seconds),
                 history_max_rounds=int(args.history_max_rounds),
+                runtime_profile=profile_override,
             )
 
         user_access = UserAccessService(

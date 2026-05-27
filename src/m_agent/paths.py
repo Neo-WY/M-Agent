@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
@@ -54,3 +55,40 @@ def memory_workflow_dir(workflow_id: str) -> Path:
 
 def memory_stage_dir(workflow_id: str, stage_name: str) -> Path:
     return memory_workflow_dir(workflow_id) / str(stage_name)
+
+
+def chat_user_slug(user_name: str, *, fallback: str = "user") -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(user_name or "").strip().lower())
+    slug = re.sub(r"-{2,}", "-", slug).strip("-_.")
+    return slug[:48] or fallback
+
+
+def chat_memory_workflow_id(user_name: str) -> str:
+    """Workflow id for per-user chat persistence (dialogues + episodic RAG)."""
+    return f"chat-api/{chat_user_slug(user_name)}"
+
+
+def chat_user_persistence_root(user_name: str) -> Path:
+    """Per-user tree under ``data/memory/chat-api/<slug>/``."""
+    root = memory_workflow_dir(chat_memory_workflow_id(user_name))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def chat_user_dialogues_dir(user_name: str) -> Path:
+    root = chat_user_persistence_root(user_name) / "dialogues"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def chat_user_episodic_rag_paths(user_name: str) -> tuple[Path, str, Path]:
+    """Return ``(storage_dir, workflow_id, index_root)`` for :class:`RagStore`.
+
+    Index files live at ``<user_root>/episodic/{chunks.jsonl, embeddings.npy}``,
+    sibling to ``dialogues/``.
+    """
+    user_root = chat_user_persistence_root(user_name)
+    workflow_id = "episodic"
+    index_root = user_root / workflow_id
+    index_root.mkdir(parents=True, exist_ok=True)
+    return user_root, workflow_id, index_root

@@ -1,44 +1,45 @@
 # Project Structure
 
-本次结构优化遵循 4 个原则：
+设计原则：
 
-1. 源码统一收敛到 `src/m_agent/`，避免业务模块散落在仓库根目录。
-2. 所有可执行入口集中到 `scripts/`，让“源码”和“运行入口”职责分离。
-3. 测试、示例、实验目录独立，避免和正式源码混放。
-4. 项目根路径通过 `m_agent.paths` 统一管理，减少各模块自己计算 `parents[...]`。
-
-当前推荐目录如下：
+1. 源码收敛在 `src/m_agent/`。
+2. 可执行入口在 `scripts/`（chat API、工具脚本）；**LoCoMo / 记忆评测** 在 [**WorkspaceMem**](F:/AI/WorkspaceMem)。
+3. 测试、示例、实验目录与正式源码分离。
+4. 路径统一由 `m_agent.paths` / `m_agent.config_paths` 管理。
 
 ```text
 M-Agent/
 ├─ src/m_agent/
-│  ├─ agents/
-│  ├─ load_data/
-│  ├─ load_model/
-│  ├─ memory/
-│  ├─ pipeline/
+│  ├─ agents/              # 领域 Agent：Email / Schedule
+│  ├─ layers/              # perception / thinking / execution 三层
+│  ├─ api/                 # FastAPI、ChatServiceRuntime、SSE
+│  ├─ chat/                # ThreeLayerChatAgent（组装 layers + systems）
+│  ├─ systems/             # wm / episodic / tools（协议 + loader）
+│  │  ├─ wm/               # protocols.py, system.py, default/
+│  │  ├─ episodic/         # protocols.py, system.py, default/（RAG 等）
+│  │  └─ tools/            # base.py, registry.py, default/（capabilities）
+│  ├─ load_model/          # Chat / RAG 用 embedding、LLM 调用
 │  └─ utils/
-├─ scripts/
+├─ scripts/                # 非 eval 的运维/工具脚本
 ├─ tests/
-├─ examples/
-├─ experiments/
 ├─ config/
+│  ├─ agents/chat/         # chat_controller.yaml、chat_model.yaml
+│  └─ systems/             # wm / episodic / tools 子系统 YAML
 ├─ data/
-├─ docs/
-└─ tools/
+└─ docs/
 ```
 
-几个约定：
+约定：
 
-- `src/m_agent/paths.py` 是统一路径入口，项目根目录、`config/`、`data/`、`log/`、`model/` 都从这里取。
-- `scripts/run_locomo/_bootstrap.py` 负责在直接运行 LoCoMo 脚本时补齐 `src/` 到 `sys.path`。
-- `tests/conftest.py` 统一处理测试运行时的导入路径。
-- `docs/analysis/` 存放分析型文档，避免 `.md` 文件继续堆在仓库根目录。
+- **三层栈**：`layers/perception`（`PerceptionInput` 组装）、`layers/thinking`、`layers/execution`。
+- **子系统插件开发**（详细）：[`docs/systems-plugin-development.zh-CN.md`](systems-plugin-development.zh-CN.md)
+- **工具能力** 只在 `src/m_agent/systems/tools/capabilities/` 实现；`chat/capabilities` 等旧路径已移除。
+- **Episodic 默认**：`config/systems/episodic/rag_default.yaml` → `SimpleRagEpisodicBackend`；Chat 运行时按用户写入 `data/memory/chat-api/<user>/episodic/`（RAG）与 `dialogues/`（flush 归档），详见 [`systems-plugin-development.zh-CN.md`](systems-plugin-development.zh-CN.md) §3.4.1。
+- **完整 MemoryAgent**：见 `F:/AI/WorkspaceMem`（`workspace_mem` 包）。
 
-推荐的常用命令：
+常用命令：
 
 ```bash
-python scripts/run_locomo/import_locomo.py --env-config config/eval/memory_agent/locomo/test_env.yaml
-python scripts/run_locomo/eval_locomo.py --env-config config/eval/memory_agent/locomo/test_env.yaml
-python scripts/run_locomo/plot_locomo_scores.py --test-id quickstart
+python -m m_agent.api.chat_api
+pytest tests/
 ```

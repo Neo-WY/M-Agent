@@ -19,10 +19,9 @@ from .chat_api_shared import (
 )
 
 TRACE_LOGGER_NAMES = (
-    "m_agent.agents.memory_agent",
-    "m_agent.agents.chat_controller_agent",
-    "Agents.memory_agent",
-    "Agents.chat_controller_agent",
+    "m_agent.layers.execution",
+    "m_agent.layers.thinking",
+    "m_agent.systems",
 )
 
 logger = logging.getLogger(__name__)

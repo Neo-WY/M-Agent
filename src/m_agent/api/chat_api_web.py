@@ -7,7 +7,7 @@ import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,12 +21,15 @@ from .chat_api_models import (
     ChatImageAttachment,
     ScheduleCreateRequest,
     ScheduleUpdateRequest,
+    DialogueImportRequest,
     ThreadMemoryFlushRequest,
     ThreadMemoryModeRequest,
+    ThreadStimulusRequest,
     UserConfigPatchRequest,
     UserLoginRequest,
     UserRegisterRequest,
 )
+from .thread_runtime_status import THREAD_RUNTIME_STATUS
 from .chat_image_captioner import ChatImageCaptioner
 from .chat_image_store import ChatImageStore
 from .chat_dialogue_store import get_dialogue_detail, list_dialogues
@@ -42,6 +45,8 @@ from .chat_api_records import (
 from .chat_api_runtime import ChatServiceRuntime
 from .schedule_heartbeat import ScheduleHeartbeatCoordinator
 from .chat_api_shared import (
+    ensure_dialogue_archive,
+    resolve_dialogues_dir_for_agent,
     _extract_access_token,
     _get_thread_lock,
     _normalize_memory_mode,
@@ -353,12 +358,26 @@ def create_app(
             owner_id=owner_id,
         )
 
-    def _serialize_schedule_heartbeat(thread_id: str) -> Dict[str, Any]:
+    def _serialize_schedule_heartbeat(
+        thread_id: str,
+        *,
+        runtime_thread_id: Optional[str] = None,
+        active_runtime: Optional[ChatServiceRuntime] = None,
+    ) -> Dict[str, Any]:
         payload = dict(schedule_heartbeat.health_payload())
+        internal_tid = str(runtime_thread_id or thread_id or "").strip()
+        profile = "legacy"
+        if active_runtime is not None:
+            profile = active_runtime.runtime_profile
+        thread_runtime = THREAD_RUNTIME_STATUS.snapshot(
+            internal_tid,
+            default_profile=profile,
+        ).to_dict()
         return {
             "thread_id": thread_id,
             "scope": "owner",
             "heartbeat": payload,
+            "thread_runtime": thread_runtime,
         }
 
     def _load_thread_schedule_item(
@@ -410,6 +429,9 @@ def create_app(
                 "get_run": "/v1/chat/runs/{run_id}",
                 "stream_events": "/v1/chat/runs/{run_id}/events",
                 "thread_events": "/v1/chat/threads/{thread_id}/events",
+                "thread_scene": "/v1/chat/threads/{thread_id}/scene",
+                "thread_transactions": "/v1/chat/threads/{thread_id}/transactions",
+                "thread_stimuli": "/v1/chat/threads/{thread_id}/stimuli",
                 "thread_state": "/v1/chat/threads/{thread_id}/memory/state",
                 "thread_mode": "/v1/chat/threads/{thread_id}/memory/mode",
                 "thread_flush": "/v1/chat/threads/{thread_id}/memory/flush",
@@ -419,6 +441,8 @@ def create_app(
                 "update_schedule": "/v1/chat/threads/{thread_id}/schedules/{schedule_id}",
                 "cancel_schedule": "/v1/chat/threads/{thread_id}/schedules/{schedule_id}",
                 "list_dialogues": "/v1/chat/dialogues",
+                "import_dialogues": "/v1/chat/dialogues/import",
+                "upload_dialogues": "/v1/chat/dialogues/upload",
                 "get_dialogue": "/v1/chat/dialogues/{dialogue_id}",
                 "openapi": "/openapi.json",
                 "docs": "/docs",
@@ -506,8 +530,7 @@ def create_app(
                 user=user,
                 updates={
                     "chat": dict(body.chat or {}),
-                    "memory_agent": dict(body.memory_agent or {}),
-                    "memory_core": dict(body.memory_core or {}),
+                    "model": dict(body.model or {}),
                 },
             )
         except UserAccessError as exc:
@@ -606,9 +629,9 @@ def create_app(
         if auth_error is not None:
             return auth_error
         username = user.username if user is not None else None
+        ensure_dialogue_archive(active_runtime.agent)
         try:
-            memory_persistence = getattr(active_runtime.agent, "memory_persistence", None)
-            dialogues_dir = Path(getattr(memory_persistence, "dialogues_dir"))
+            dialogues_dir = resolve_dialogues_dir_for_agent(active_runtime.agent)
         except Exception as exc:
             return _error_response(status_code=500, message=f"failed to resolve dialogues directory: {exc}")
 
@@ -629,9 +652,9 @@ def create_app(
         if auth_error is not None:
             return auth_error
         username = user.username if user is not None else None
+        ensure_dialogue_archive(active_runtime.agent)
         try:
-            memory_persistence = getattr(active_runtime.agent, "memory_persistence", None)
-            dialogues_dir = Path(getattr(memory_persistence, "dialogues_dir"))
+            dialogues_dir = resolve_dialogues_dir_for_agent(active_runtime.agent)
         except Exception as exc:
             return _error_response(status_code=500, message=f"failed to resolve dialogues directory: {exc}")
 
@@ -644,6 +667,91 @@ def create_app(
         except FileNotFoundError:
             return _error_response(status_code=404, message=f"dialogue not found: {dialogue_id}")
         return JSONResponse(content=payload)
+
+    @app.post("/v1/chat/dialogues/import")
+    def import_chat_dialogues(body: DialogueImportRequest, request: Request) -> JSONResponse:
+        """Import dialogue JSON (e.g. migrate ``data/memory/user_<name>/dialogues``) and index RAG."""
+        user, active_runtime, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        ensure_dialogue_archive(active_runtime.agent)
+        result = active_runtime.import_dialogues(
+            migrate_legacy=bool(body.migrate_legacy),
+            rebuild_rag=bool(body.rebuild_rag),
+            index_rag=bool(body.index_rag),
+            copy_files=bool(body.copy_files),
+            dialogue_ids=list(body.dialogue_ids or []) or None,
+        )
+        return JSONResponse(content=result)
+
+    @app.post("/v1/chat/dialogues/upload", response_class=StreamingResponse, response_model=None)
+    async def upload_chat_dialogues(
+        request: Request,
+        files: List[UploadFile] = File(...),
+        rebuild_rag: bool = Form(default=False),
+        index_rag: bool = Form(default=True),
+    ) -> StreamingResponse | JSONResponse:
+        """Batch-upload dialogue JSON files; stream per-file validation + RAG index progress (SSE)."""
+        from m_agent.chat.dialogue_validation import MAX_DIALOGUE_FILE_BYTES
+
+        user, active_runtime, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        if not files:
+            return _error_response(status_code=400, message="at least one .json dialogue file is required")
+
+        max_files = 100
+        if len(files) > max_files:
+            return _error_response(status_code=400, message=f"too many files (max {max_files})")
+
+        ensure_dialogue_archive(active_runtime.agent)
+        uploads: List[Tuple[str, bytes]] = []
+        for item in files:
+            if item is None:
+                continue
+            name = str(item.filename or "upload.json").strip()
+            if not name.lower().endswith(".json"):
+                return _error_response(status_code=400, message=f"only .json files are supported: {name}")
+            try:
+                content = await item.read()
+            except Exception as exc:
+                return _error_response(status_code=400, message=f"failed to read upload {name}: {exc}")
+            if len(content) > MAX_DIALOGUE_FILE_BYTES:
+                return _error_response(
+                    status_code=400,
+                    message=f"file too large (max {MAX_DIALOGUE_FILE_BYTES} bytes): {name}",
+                )
+            uploads.append((name, content))
+
+        if not uploads:
+            return _error_response(status_code=400, message="no readable dialogue files in request")
+
+        def event_stream():
+            try:
+                for event in active_runtime.iter_upload_dialogues(
+                    uploads,
+                    rebuild_rag=bool(rebuild_rag),
+                    index_rag=bool(index_rag),
+                ):
+                    yield _encode_sse(event)
+            except Exception as exc:
+                yield _encode_sse(
+                    {
+                        "seq": 0,
+                        "type": "upload_failed",
+                        "payload": {"message": str(exc)},
+                    }
+                )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/v1/chat/runs/{run_id}")
     def get_run(run_id: str, request: Request) -> JSONResponse:
@@ -734,6 +842,85 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.get("/v1/chat/threads/{thread_id}/transactions")
+    def get_thread_transactions(thread_id: str, request: Request) -> JSONResponse:
+        user, active_runtime, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        if active_runtime.runtime_profile != "think_life":
+            return JSONResponse(
+                status_code=404,
+                content={"error": "profile_not_supported", "runtime_profile": active_runtime.runtime_profile},
+            )
+        runtime_thread_id = _runtime_thread_id(user, thread_id)
+        try:
+            payload = active_runtime.get_think_life_transactions(runtime_thread_id)
+        except RuntimeError:
+            return JSONResponse(status_code=404, content={"error": "profile_not_supported"})
+        payload["thread_id"] = thread_id
+        return JSONResponse(content=payload)
+
+    @app.get("/v1/chat/threads/{thread_id}/scene")
+    def get_thread_scene(
+        thread_id: str,
+        request: Request,
+        limit: int = 40,
+        before_seq: Optional[int] = None,
+    ) -> JSONResponse:
+        user, active_runtime, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        if active_runtime.runtime_profile != "think_life":
+            return JSONResponse(
+                status_code=404,
+                content={"error": "profile_not_supported", "runtime_profile": active_runtime.runtime_profile},
+            )
+        runtime_thread_id = _runtime_thread_id(user, thread_id)
+        try:
+            payload = active_runtime.get_scene(
+                runtime_thread_id,
+                limit=limit,
+                before_seq=before_seq,
+            )
+        except RuntimeError:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "profile_not_supported"},
+            )
+        payload["thread_id"] = thread_id
+        return JSONResponse(content=payload)
+
+    @app.post("/v1/chat/threads/{thread_id}/stimuli")
+    def post_thread_stimulus(
+        thread_id: str,
+        body: ThreadStimulusRequest,
+        request: Request,
+    ) -> JSONResponse:
+        user, active_runtime, auth_error = _resolve_user_and_runtime(request)
+        if auth_error is not None:
+            return auth_error
+        if active_runtime.runtime_profile != "think_life":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "profile_not_supported", "runtime_profile": active_runtime.runtime_profile},
+            )
+        runtime_thread_id = _runtime_thread_id(user, thread_id)
+        attachments = list(body.attachments or [])
+        message = str(body.text or "").strip()
+        if not message and not _has_effective_attachment(attachments):
+            return JSONResponse(status_code=400, content={"error": "text and attachments are both empty"})
+        user_turn = _build_user_turn_payload(message=message, attachments=attachments)
+        try:
+            result = active_runtime.submit_stimulus(
+                thread_id=runtime_thread_id,
+                message=message,
+                user_turn=user_turn,
+            )
+        except RuntimeError:
+            return JSONResponse(status_code=409, content={"error": "profile_not_supported"})
+        result["thread_id"] = thread_id
+        return JSONResponse(status_code=202, content=result)
 
     @app.get("/v1/chat/threads/{thread_id}/memory/state")
     def get_thread_state(thread_id: str, request: Request) -> JSONResponse:
@@ -828,10 +1015,17 @@ def create_app(
 
     @app.get("/v1/chat/threads/{thread_id}/schedules/heartbeat")
     def get_schedule_heartbeat(thread_id: str, request: Request) -> JSONResponse:
-        _, _, auth_error = _resolve_user_and_runtime(request)
+        user, active_runtime, auth_error = _resolve_user_and_runtime(request)
         if auth_error is not None:
             return auth_error
-        return JSONResponse(content=_serialize_schedule_heartbeat(thread_id))
+        runtime_thread_id = _runtime_thread_id(user, thread_id)
+        return JSONResponse(
+            content=_serialize_schedule_heartbeat(
+                thread_id,
+                runtime_thread_id=runtime_thread_id,
+                active_runtime=active_runtime,
+            )
+        )
 
     @app.get("/v1/chat/threads/{thread_id}/schedules/{schedule_id}")
     def get_thread_schedule(schedule_id: str, thread_id: str, request: Request) -> JSONResponse:

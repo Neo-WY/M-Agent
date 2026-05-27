@@ -56,7 +56,7 @@ In the current implementation:
 | Chat runs | `POST /v1/chat/runs` `GET /v1/chat/runs/{run_id}` `GET /v1/chat/runs/{run_id}/events` | 创建对话、获取结果、订阅 run 级事件 | Create run, fetch final result, subscribe to run events |
 | Thread events | `GET /v1/chat/threads/{thread_id}/events` | 线程级事件流 | Thread-level SSE stream |
 | Thread memory | `GET /v1/chat/threads/{thread_id}/memory/state` `POST /v1/chat/threads/{thread_id}/memory/mode` `POST /v1/chat/threads/{thread_id}/memory/flush` | 查看线程记忆状态、切换模式、手动 flush | Inspect thread state, switch memory mode, manually flush |
-| Dialogues | `GET /v1/chat/dialogues` `GET /v1/chat/dialogues/{dialogue_id}` | 已 flush 的对话归档列表与详情 | Flushed dialogue archive list and detail |
+| Dialogues | `GET /v1/chat/dialogues` `GET /v1/chat/dialogues/{dialogue_id}` `POST /v1/chat/dialogues/import` `POST /v1/chat/dialogues/upload` | 已归档对话列表/详情；迁移/批量上传 JSON 并建 RAG 索引（上传为 SSE 进度） | Dialogue list/detail; legacy import; multipart upload + SSE progress |
 | Schedules | `GET/POST/PATCH/DELETE /v1/chat/threads/{thread_id}/schedules...` | 日程提醒查询、创建、更新、取消 | Schedule query, create, update, cancel |
 
 ## 3. Startup / 启动方式
@@ -376,11 +376,27 @@ Each `turns[]` item contains:
 | `items_started` | `integer` | 已开始执行的任务总数 | Total started items |
 | `items_completed` | `integer` | 已完成任务总数 | Total completed items |
 | `items_failed` | `integer` | 已失败任务总数 | Total failed items |
-| `items_busy_retried` | `integer` | 因线程忙而重试的任务总数 | Total busy-retried items |
+| `items_busy_retried` | `integer` | 因线程忙而重试的任务总数（旧字段，等价于 `counters.schedule_busy_retries_total`） | Total busy-retried items (legacy; same as `counters.schedule_busy_retries_total`) |
+| `status` | `string` | `healthy` / `degraded` / `unhealthy` | Worker health summary |
+| `counters.schedule_busy_retries_total` | `integer` | 单次心跳内因 `thread_runtime.busy==true` 推迟 lease 的条数 | Schedules deferred per beat because `thread_runtime.busy` |
 | `last_beat_started_at` | `string \| null` | 最近一次扫描开始时间 | Last beat start time |
 | `last_beat_finished_at` | `string \| null` | 最近一次扫描结束时间 | Last beat finish time |
 | `next_beat_due_at` | `string \| null` | 下一次扫描时间 | Next scheduled beat time |
 | `last_error` | `string \| null` | 最近错误 | Last error |
+
+### 5.11.1 `ThreadRuntime`（per-thread）
+
+| Field | Type | 中文说明 | English description |
+| --- | --- | --- | --- |
+| `busy` | `boolean` | Legacy：lease 门控；think_life：`effective_depth >= 2` | Busy flag |
+| `busy_reason` | `string` | Legacy 原因码；think_life 多为 `runtime_phase` | Busy reason code |
+| `runtime_phase` | `string` | `ready` / `processing` / `busy`（think_life 队列投影） | Queue-derived phase |
+| `effective_depth` | `integer` | inbox + 在途刺激数 | Effective queue depth |
+| `pending_stimuli` | `integer` | Think-life 感知 inbox 深度（未 pop） | Think-life inbox depth |
+| `in_flight_stimulus_id` | `string \| null` | 当前正在消费的刺激 id | In-flight stimulus |
+| `runtime_profile` | `string` | `legacy` 或 `think_life` | Active runtime profile |
+| `active_transaction_id` | `string \| null` | 当前 CPU 事务 | Active Think-life transaction |
+| `preempt_enabled` | `boolean` | 是否启用刺激抢占 | Preemption enabled |
 
 ### 5.12 `SSEEnvelope`
 
@@ -485,8 +501,7 @@ Success response:
     "updated_at": "2026-04-05T09:00:00Z",
     "editable_fields": {
       "chat": ["chat_assistant_name", "chat_persona_prompt"],
-      "memory_agent": [],
-      "memory_core": []
+      "model": []
     }
   }
 }
@@ -539,8 +554,7 @@ Example:
     "updated_at": "2026-04-05T09:00:00Z",
     "editable_fields": {
       "chat": ["chat_assistant_name", "chat_persona_prompt"],
-      "memory_agent": [],
-      "memory_core": []
+      "model": []
     }
   },
   "access_token": "paste-me",
@@ -579,8 +593,7 @@ Success response:
     "updated_at": "2026-04-05T09:00:00Z",
     "editable_fields": {
       "chat": ["chat_assistant_name", "chat_persona_prompt"],
-      "memory_agent": [],
-      "memory_core": []
+      "model": []
     }
   }
 }
@@ -626,7 +639,7 @@ Top-level response:
 | Field | Type | 中文说明 | English description |
 | --- | --- | --- | --- |
 | `user` | `object` | 当前用户与配置路径信息 | Current user and config path |
-| `sections` | `object` | `chat` / `memory_agent` / `memory_core` 三个 section | Three config sections |
+| `sections` | `object` | `chat` / `model` 两个 section | Two config sections |
 
 Each `sections.<name>` object contains:
 
@@ -665,14 +678,15 @@ Request body:
     "chat_assistant_name": "Memory Assistant",
     "chat_persona_prompt": "Be concise."
   },
-  "memory_agent": {},
-  "memory_core": {}
+  "model": {
+    "model_name": "deepseek-chat"
+  }
 }
 ```
 
 Body rules / 请求规则:
 
-- top-level keys are `chat`, `memory_agent`, `memory_core`
+- top-level keys are `chat`, `model`
 - each section must be an object if present
 - at least one effective field change is required
 - unsupported keys return `400`
@@ -692,21 +706,14 @@ Role `advanced` adds:
 - `chat.enabled_tools`
 - `chat.tool_defaults`
 - `chat.thread_id`
-- `memory_agent.model_name`
-- `memory_agent.agent_temperature`
-- `memory_agent.recursion_limit`
-- `memory_agent.retry_recursion_limit`
-- `memory_agent.detail_search_defaults`
-- `memory_agent.network_retry_attempts`
-- `memory_agent.network_retry_backoff_seconds`
-- `memory_agent.network_retry_backoff_multiplier`
-- `memory_agent.network_retry_max_backoff_seconds`
-- `memory_core.workflow_id`
-- `memory_core.memory_owner_name`
-- `memory_core.memory_similarity_threshold`
-- `memory_core.memory_top_k`
-- `memory_core.memory_use_threshold`
-- `memory_core.embed_provider`
+- `model.model_name`
+- `model.agent_temperature`
+- `model.recursion_limit`
+- `model.retry_recursion_limit`
+- `model.network_retry_attempts`
+- `model.network_retry_backoff_seconds`
+- `model.network_retry_backoff_multiplier`
+- `model.network_retry_max_backoff_seconds`
 
 Success response:
 
@@ -721,8 +728,7 @@ Success response:
     "updated_at": "2026-04-05T09:10:00Z",
     "editable_fields": {
       "chat": ["chat_assistant_name", "chat_persona_prompt"],
-      "memory_agent": [],
-      "memory_core": []
+      "model": []
     }
   }
 }
@@ -988,6 +994,62 @@ Common errors:
 
 - `404`: not found or not visible to the current user
 
+### 6.16b `POST /v1/chat/dialogues/import`
+
+用途 / Purpose:
+
+- 将磁盘上的 dialogue JSON 导入当前用户的 `data/memory/chat-api/<user>/dialogues/`，并写入情景 RAG（`episodic/chunks.jsonl`）
+- Import on-disk dialogue archives for the logged-in user and index episodic RAG
+
+Auth / 鉴权:
+
+- requires login (same as other chat endpoints)
+
+Request body:
+
+| Field | Type | Default | 中文说明 | English description |
+| --- | --- | --- | --- | --- |
+| `migrate_legacy` | `boolean` | `false` | 从 `data/memory/user_<username>/dialogues/` 迁移 | Copy from legacy `user_<username>` tree |
+| `rebuild_rag` | `boolean` | `false` | 重建前清空 `episodic/` 索引 | Clear episodic index before import |
+| `index_rag` | `boolean` | `true` | 是否写入 RAG | Whether to append RAG chunks |
+| `copy_files` | `boolean` | `true` | 是否复制 JSON 到用户 dialogues 目录 | Copy JSON into user dialogues dir |
+| `dialogue_ids` | `array[string]` | null | 仅导入指定 id（不迁移时从当前用户 dialogues 目录取） | Filter by dialogue id when not migrating |
+
+Example (migrate legacy tree for current user):
+
+```json
+{
+  "migrate_legacy": true,
+  "rebuild_rag": true,
+  "index_rag": true
+}
+```
+
+Note: this does **not** flush in-memory `pending_rounds`; use `POST .../memory/flush` separately for live chat buffer.
+
+### 6.16c `POST /v1/chat/dialogues/upload`
+
+用途 / Purpose:
+
+- 批量上传 `.json` Dialogue 归档文件（`multipart/form-data`），服务端校验后写入 `dialogues/` 并索引情景 RAG
+- Batch-upload validated dialogue JSON; response is **SSE** with per-file progress
+
+Auth / 鉴权:
+
+- requires login
+
+Form fields:
+
+| Field | Type | Default | 说明 |
+| --- | --- | --- | --- |
+| `files` | file[] | required | 一个或多个 `.json` 文件 |
+| `rebuild_rag` | bool | `false` | 导入前清空 `episodic/` |
+| `index_rag` | bool | `true` | 是否写入 RAG |
+
+SSE events: `upload_started`, `upload_progress` (`current`/`total`/`dialogue_id`/`filename`/`status`), `upload_completed`.
+
+Validation: UTF-8 JSON、`dialogue_id`、非空 `turns`、可配对 user/assistant 轮次、单文件 ≤ 5MB、单次 ≤ 100 文件。
+
 ### 6.17 `GET /v1/chat/threads/{thread_id}/schedules`
 
 用途 / Purpose:
@@ -1030,6 +1092,16 @@ Success response fields:
 | `items` | `array[ScheduleItem]` | 日程列表 | Schedule items |
 | `heartbeat` | `ScheduleHeartbeat` | 当前心跳状态摘要 | Current heartbeat summary |
 
+### 6.17a `GET /v1/chat/threads/{thread_id}/scene`（`runtime.profile=think_life`）
+
+- 返回跨事务、按时间序的 Scene 日志（分页 `limit` / `before_seq`）
+- Returns chronological Scene log across transactions
+
+### 6.17b `POST /v1/chat/threads/{thread_id}/stimuli`（`think_life` only）
+
+- **202**：用户消息入队；后台 `ThreadDrainer` 消费
+- **409**：`profile_not_supported`（legacy 请用 `POST /v1/chat/runs`）
+
 ### 6.18 `GET /v1/chat/threads/{thread_id}/schedules/heartbeat`
 
 用途 / Purpose:
@@ -1051,6 +1123,16 @@ Success response:
     "enabled": true,
     "worker_alive": true,
     "beat_interval_seconds": 10
+  },
+  "thread_runtime": {
+    "busy": false,
+    "busy_reason": "idle",
+    "runtime_phase": "ready",
+    "effective_depth": 0,
+    "pending_stimuli": 0,
+    "in_flight_stimulus_id": null,
+    "runtime_profile": "think_life",
+    "preempt_enabled": false
   }
 }
 ```
@@ -1255,6 +1337,11 @@ The following event types may appear on `GET /v1/chat/threads/{thread_id}/events
 | `schedule_completed` | 到点任务执行完成 | Due schedule execution completed | `thread_id`, `schedule_id`, `run_id`, `status`, `answer` |
 | `schedule_failed` | 到点任务执行失败 | Due schedule execution failed | `thread_id`, `schedule_id`, `run_id`, `error` |
 | `assistant_message` | 日程触发后的回答 | Assistant message emitted by a schedule trigger | `thread_id`, `answer`, `source`, `schedule_id` |
+| `stimulus_queued` | Think-life 刺激入队 | Stimulus enqueued (Think-life) | `stimulus_id`, `kind`, `pending_count` |
+| `reply_emitted` | Think-life 用户可见回复 | User-visible reply (`reply_to_user`) | `message`, `finalize`, `transaction_id`, `delegate_id` |
+| `scene_entry_appended` | Scene 时间轴新增条目 | Scene timeline entry appended | `seq`, `occurred_at`, `entry_type`, `actor`, `text`, `transaction_id` |
+| `thread_runtime_updated` | 单线程运行时 busy/队列快照 | Per-thread runtime busy/queue snapshot | `thread_runtime` |
+| `thinking_*` | 三层思考流式事件 | Three-layer thinking stream events | varies |
 
 Notes / 说明:
 

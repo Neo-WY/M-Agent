@@ -10,10 +10,16 @@ from .runtime_fakes import FakeRuntime
 from .user_access_fakes import FakeUserAccessService
 
 
-def build_test_runtime(*, config_path: Path | None = None, default_thread_id: str = "demo-thread") -> FakeRuntime:
+def build_test_runtime(
+    *,
+    config_path: Path | None = None,
+    default_thread_id: str = "demo-thread",
+    runtime_profile: str = "legacy",
+) -> FakeRuntime:
     return FakeRuntime(
         config_path=config_path or Path("tests/configs/chat_api.test.yaml"),
         default_thread_id=default_thread_id,
+        runtime_profile=runtime_profile,
     )
 
 

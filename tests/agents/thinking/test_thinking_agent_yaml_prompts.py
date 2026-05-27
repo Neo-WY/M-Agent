@@ -1,0 +1,153 @@
+"""Verify YAML-loaded prompts are used by ThinkingAgent / persona helpers.
+
+These tests poke at the prompt-assembly internals directly so they don't
+require a real LLM or sub-agent stack.
+"""
+from __future__ import annotations
+
+from m_agent.layers.execution.contracts import ExecutionResult
+from m_agent.layers.execution.model_provider import ModelProvider
+from m_agent.layers.thinking import (
+    ConversationStateRegistry,
+    PerceptionInput,
+    ThinkingAgent,
+)
+from m_agent.systems.episodic import DefaultEpisodeRecorder
+from m_agent.layers.thinking.persona import (
+    build_capability_boundary_block,
+    build_runtime_context_block,
+)
+from m_agent.paths import PROJECT_ROOT
+from m_agent.prompt_utils import load_resolved_prompt_config
+
+
+class _NoopExecutionAgent:
+    def describe_capabilities_block(self) -> str:
+        return "[mock-caps]\n- noop"
+
+    def execute(self, request, *, wm_writer_callback=None):
+        return ExecutionResult(summary="noop")
+
+
+def test_capability_boundary_block_uses_override_header() -> None:
+    body = "[caps]\n- shallow_recall"
+    custom = "[OVERRIDE HEADER]\nfollow these rules"
+    out = build_capability_boundary_block(body, language="zh", header_template=custom)
+    assert out.startswith("[OVERRIDE HEADER]")
+    assert "shallow_recall" in out
+
+
+def test_capability_boundary_block_falls_back_to_default_when_blank() -> None:
+    body = "[caps]\n- shallow_recall"
+    out_zh = build_capability_boundary_block(body, language="zh", header_template="")
+    out_en = build_capability_boundary_block(body, language="en", header_template="   ")
+    assert "[可委托能力]" in out_zh
+    assert "[Delegable Capabilities]" in out_en
+
+
+def test_runtime_context_template_placeholders_are_substituted() -> None:
+    schedule_tpl = "HEADER\nS=<source>\nCTX=<context_json>"
+    block = build_runtime_context_block(
+        source="schedule",
+        system_context={"schedule_id": "sch_1"},
+        language="zh",
+        schedule_template=schedule_tpl,
+        generic_template="",
+    )
+    assert "HEADER" in block
+    assert "S=schedule" in block
+    assert '"schedule_id"' in block and "sch_1" in block
+
+    # Generic path picked when source != schedule
+    generic_tpl = "GEN\nS=<source>"
+    block2 = build_runtime_context_block(
+        source="external",
+        system_context={"k": "v"},
+        language="zh",
+        schedule_template="should-not-be-used",
+        generic_template=generic_tpl,
+    )
+    assert block2.startswith("GEN")
+    assert "S=external" in block2
+
+
+def test_runtime_context_block_skipped_when_user_and_empty_context() -> None:
+    assert build_runtime_context_block(source="user", system_context=None, language="zh") == ""
+    assert build_runtime_context_block(source="user", system_context={}, language="en") == ""
+
+
+def test_thinking_agent_uses_override_plan_and_fallback_prompts() -> None:
+    custom_plan = "[CUSTOM PLAN BLOCK]"
+    custom_summary = "[CUSTOM SUMMARY BLOCK]"
+    custom_fallback = "兜底 OVERRIDE"
+    custom_cap_header = "[CUSTOM CAP HEADER]"
+    custom_schedule = "SCH-CUSTOM source=<source> ctx=<context_json>"
+    custom_generic = "GEN-CUSTOM source=<source> ctx=<context_json>"
+
+    agent = ThinkingAgent(
+        execution_agent=_NoopExecutionAgent(),
+        model_provider=ModelProvider(model=None),
+        system_prompt="SYS",
+        wm_reader=None,
+        wm_writer=None,
+        episode_recorder=DefaultEpisodeRecorder(),
+        state_registry=ConversationStateRegistry(),
+        prompt_language="zh",
+        plan_instructions_prompt=custom_plan,
+        summarize_instructions_prompt=custom_summary,
+        capability_boundary_header=custom_cap_header,
+        runtime_context_schedule_template=custom_schedule,
+        runtime_context_generic_template=custom_generic,
+        fallback_answer_prompt=custom_fallback,
+    )
+
+    # plan / summarize instruction blocks
+    assert agent._plan_instructions_block() == custom_plan
+    assert agent._summarize_instructions_block(ExecutionResult(summary="x")) == custom_summary
+
+    # capability boundary header propagates into the assembled plan messages
+    state = agent.state_registry.get_or_create("c::0", thread_id="t1")
+    perception = PerceptionInput(
+        thread_id="t1",
+        conversation_id="c::0",
+        user_message="你好",
+        source="schedule",
+        system_context={"schedule_id": "abc"},
+    )
+    messages = agent._build_plan_messages(perception, state)
+    sys_text = messages[0]["content"]
+    assert custom_cap_header in sys_text
+    assert "SCH-CUSTOM" in sys_text
+    assert "source=schedule" in sys_text
+    assert custom_plan in sys_text
+
+    # fallback answer override
+    assert agent._fallback_answer(perception) == custom_fallback
+
+
+def test_chat_controller_runtime_yaml_contains_three_layer_prompt_sections() -> None:
+    """Smoke test: the shipped YAML exposes thinking / execution prompt keys."""
+    path = PROJECT_ROOT / "config" / "agents" / "chat" / "runtime" / "chat_controller_runtime.yaml"
+    resolved = load_resolved_prompt_config(path, language="zh")
+    cc = resolved.get("chat_controller")
+    assert isinstance(cc, dict)
+
+    thinking = cc.get("thinking")
+    assert isinstance(thinking, dict), "chat_controller.thinking must be defined"
+    for key in (
+        "base_prompt",
+        "persona_tone_prompt",
+        "persona_merge_template",
+        "plan_instructions",
+        "summarize_instructions",
+        "capability_boundary_header",
+        "runtime_context_schedule",
+        "runtime_context_generic",
+        "fallback_answer",
+    ):
+        assert isinstance(thinking.get(key), str) and thinking[key].strip(), f"missing or empty: thinking.{key}"
+
+    execution = cc.get("execution")
+    assert isinstance(execution, dict), "chat_controller.execution must be defined"
+    for key in ("role_prompt", "tool_policy", "capability_block_header", "fallback_system_prompt"):
+        assert isinstance(execution.get(key), str) and execution[key].strip(), f"missing or empty: execution.{key}"

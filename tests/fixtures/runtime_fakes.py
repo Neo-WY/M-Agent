@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple
 from uuid import uuid4
 
 
@@ -247,6 +247,8 @@ class FakeScheduleAgent:
 class FakeRuntimeAgent:
     def __init__(self, schedule_agent: FakeScheduleAgent) -> None:
         self._schedule_agent = schedule_agent
+        self.user_name = "default"
+        self.assistant_name = "Memory Assistant"
         # keep parity with production runtime shape for dialogue endpoints
         self.memory_persistence = type("MemoryPersistence", (), {"dialogues_dir": str(Path(".") / "tmp-dialogues")})()
 
@@ -261,16 +263,23 @@ class FakeRuntime:
         config_path: Path,
         default_thread_id: str = "demo-thread",
         schedule_agent: FakeScheduleAgent | None = None,
+        runtime_profile: str = "legacy",
     ) -> None:
         self.config_path = Path(config_path)
         self.default_thread_id = default_thread_id
+        self._runtime_profile = str(runtime_profile or "legacy").strip().lower()
         self.agent = FakeRuntimeAgent(schedule_agent or FakeScheduleAgent())
         self._thread_event_sink = None
         self._threads: dict[str, dict[str, Any]] = {}
+        self._scene_entries: dict[str, list[dict[str, Any]]] = {}
         self._threads_lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._runs_failed = 0
         self._last_run_finished_at: str | None = None
+
+    @property
+    def runtime_profile(self) -> str:
+        return self._runtime_profile
 
     def set_thread_event_sink(self, sink) -> None:
         self._thread_event_sink = sink
@@ -280,11 +289,86 @@ class FakeRuntime:
 
     def health_payload(self) -> Dict[str, Any]:
         with self._threads_lock:
-            return {
+            payload: Dict[str, Any] = {
                 "config_path": str(self.config_path),
                 "default_thread_id": self.default_thread_id,
+                "runtime_profile": self._runtime_profile,
                 "thread_count": len(self._threads),
             }
+        if self._runtime_profile == "think_life":
+            payload["think_life"] = {
+                "pending_stimuli_total": 0,
+                "active_drainer_threads": 0,
+                "preempt_enabled": False,
+            }
+        return payload
+
+    def submit_stimulus(
+        self,
+        *,
+        thread_id: str,
+        message: str,
+        user_turn: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self._runtime_profile != "think_life":
+            raise RuntimeError("profile_not_supported")
+        tid = str(thread_id or self.default_thread_id).strip() or self.default_thread_id
+        stimulus_id = f"stim_{uuid4().hex[:12]}"
+        with self._threads_lock:
+            state = self._ensure_state(tid)
+            if "think_life" not in state:
+                state["think_life"] = {
+                    "pending_stimuli": 0,
+                    "busy": False,
+                    "busy_reason": "idle",
+                    "runtime_profile": "think_life",
+                }
+            state["think_life"]["pending_stimuli"] = int(state["think_life"].get("pending_stimuli", 0)) + 1
+            pending = int(state["think_life"]["pending_stimuli"])
+        if callable(self._thread_event_sink):
+            self._thread_event_sink(
+                tid,
+                "stimulus_queued",
+                {"stimulus_id": stimulus_id, "kind": "user_message", "pending_count": pending},
+            )
+        return {
+            "stimulus_id": stimulus_id,
+            "thread_id": tid,
+            "pending_count": pending,
+            "accepted": True,
+        }
+
+    def get_scene(
+        self,
+        thread_id: str,
+        *,
+        limit: int = 40,
+        before_seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if self._runtime_profile != "think_life":
+            raise RuntimeError("profile_not_supported")
+        tid = str(thread_id or self.default_thread_id).strip() or self.default_thread_id
+        with self._threads_lock:
+            entries = list(self._scene_entries.get(tid, []))
+        if before_seq is not None:
+            entries = [e for e in entries if int(e.get("seq", 0)) < int(before_seq)]
+        cap = max(1, int(limit or 40))
+        has_more = len(entries) > cap
+        if has_more:
+            entries = entries[-cap:]
+        return {"thread_id": tid, "entries": entries, "has_more": has_more}
+
+    def get_think_life_transactions(self, thread_id: str) -> Dict[str, Any]:
+        if self._runtime_profile != "think_life":
+            raise RuntimeError("profile_not_supported")
+        tid = str(thread_id or self.default_thread_id).strip() or self.default_thread_id
+        return {
+            "thread_id": tid,
+            "transactions": [],
+            "active_transaction_id": None,
+            "cpu_transaction_id": None,
+            "transaction_count": 0,
+        }
 
     def _ensure_state(self, thread_id: str) -> dict[str, Any]:
         normalized = str(thread_id or self.default_thread_id).strip() or self.default_thread_id
@@ -451,3 +535,31 @@ class FakeRuntime:
                 "pending_turns": snapshot["pending_turns"],
             },
         }
+
+    def _episodic_persistence_payload(self) -> Dict[str, Any]:
+        return {}
+
+    def iter_upload_dialogues(
+        self,
+        uploads: Sequence[Tuple[str, bytes]],
+        *,
+        rebuild_rag: bool = False,
+        index_rag: bool = True,
+    ) -> Iterator[Dict[str, Any]]:
+        from m_agent.chat.dialogue_import import import_uploaded_dialogues_stream
+
+        user_name = str(getattr(self.agent, "user_name", "default") or "default")
+        assistant_name = str(getattr(self.agent, "assistant_name", "Memory Assistant") or "Memory Assistant")
+        seq = 0
+        for event in import_uploaded_dialogues_stream(
+            user_name=user_name,
+            uploads=uploads,
+            assistant_name=assistant_name,
+            index_rag=index_rag,
+            rebuild_rag=rebuild_rag,
+            source_label="test_dialogue_upload",
+        ):
+            if event.get("type") == "upload_completed" and isinstance(event.get("payload"), dict):
+                event["payload"]["episodic_persistence"] = self._episodic_persistence_payload()
+            seq += 1
+            yield {"seq": seq, **event}

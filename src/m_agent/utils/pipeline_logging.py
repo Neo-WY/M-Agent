@@ -20,13 +20,7 @@ _NOISY_LOGGERS: Final[tuple[str, ...]] = (
     "urllib3",
     "urllib3.connectionpool",
     "http.client",
-    # MemoryAgent structured traces can be huge JSON blobs (workspace/tool/final payload).
-    # Keep them hidden unless debug is enabled.
-    "m_agent.agents.memory_agent",
-    "m_agent.agents.memory_agent.mixins",
 )
-
-_FACT_SCENE_LOGGER = "m_agent.memory.build_memory.form_scene_details"
 
 
 def suppress_verbose_pipeline_loggers(*, debug: bool = False) -> None:
@@ -48,4 +42,3 @@ def suppress_verbose_pipeline_loggers(*, debug: bool = False) -> None:
     level = logging.WARNING
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(level)
-    logging.getLogger(_FACT_SCENE_LOGGER).setLevel(level)
