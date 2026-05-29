@@ -6,4 +6,5 @@
 
 - **精简索引页**：`docs/README.md`
 - **项目中文 README（主入口）**：`README-zh.md`
+- **可插拔子系统开发指南（WM / episodic / tools）**：`docs/systems-plugin-development.zh-CN.md`
 - **Chat API 主文档**：`docs/chat_api/README.md`

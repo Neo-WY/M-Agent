@@ -37,6 +37,19 @@ def _fixed_now_context() -> dict:
     }
 
 
+def test_schedule_manage_marks_partial_for_bulk_instruction(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    result = agent.handle_manage_command(
+        thread_id="demo-thread",
+        instruction="从明天起一周每天6点起床",
+        timezone_name="Asia/Shanghai",
+        now_context=_fixed_now_context(),
+    )
+    assert result.get("success") is True
+    assert result.get("count") == 1
+    assert result.get("partial") is True
+
+
 def test_schedule_agent_create_query_update_cancel_flow(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     thread_id = "demo-thread"

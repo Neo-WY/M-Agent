@@ -7,11 +7,24 @@
 
 
 ## 运行方式
-### 服务端
-- **以服务方式运行智能体（FastAPI + SSE）**：创建 run、订阅事件流、获取最终结果，并维护 thread 级会话状态。
+
+### 服务端（Chat API）
+
+使用 **`python -m m_agent.api.chat_api`** 以 **HTTP / SSE 长驻服务** 方式运行智能体：为每条用户消息创建 run、订阅事件流、读取最终结果，服务端维护 **thread 级** 会话状态。
+
+支持两种 **运行时配置**（见 [`config/agents/chat/chat_controller.yaml`](config/agents/chat/chat_controller.yaml) 中的 `runtime.profile`）：
+
+| 配置 | 说明 |
+| --- | --- |
+| **`legacy`**（默认） | 传统三轮对话栈：感知 → 思考 → 执行 → 思考层 **总结** 后作为 API 的 `answer` 返回。 |
+| **`think_life`** | 产品运行时：刺激经 **感知总线** 入队，**按事务隔离的 WM**、按时间序追加的 **Scene log**，用户可见回复仅通过 **`reply_to_user`** 工具发出；日程心跳与执行反馈已接入。规格见 **[docs/think-life-runtime-spec.zh-CN.md](docs/think-life-runtime-spec.zh-CN.md)**。 |
+
+启用 Think-life：在 YAML 中设置 `runtime.profile: think_life`，或启动时加 `--runtime-profile think_life`（命令行覆盖 YAML）。
+
 ### 应用端
+
 - **M-Agent-UI**：最简单的信息交互形式【已推出】
-- **M-Agent-desktop**: 桌面形式的助手
+- **M-Agent-desktop**：桌面形式的助手
 
 ---
 
@@ -56,16 +69,16 @@ pip install -e .
 在项目根目录创建 `.env`，按需填写密钥与基础 URL。以下为常见项（具体以仓库内配置注释为准）：
 
 ```dotenv
-# MemoryCore LLM（如 src/m_agent/load_model/OpenAIcall.py）
+# Chat / RAG LLM（如 src/m_agent/load_model/OpenAIcall.py）
 # API_SECRET_KEY 与 OPENAI_API_KEY 二选一填写即可
 API_SECRET_KEY=你的_OpenAI_兼容密钥
 OPENAI_API_KEY=
 BASE_URL=https://api.openai.com/v1
 
-# Agent 模型（LoCoMo 默认等配置可能指向 gpt-4o-mini 等；MemoryAgent 会将密钥映射到 LangChain 所需的 OPENAI_*）
+# Chat 模型（config/agents/chat/chat_model.yaml）
 DEEPSEEK_API_KEY=你的_DeepSeek_密钥
 
-# 嵌入（embed_provider，见 config/memory/core/*.yaml）
+# RAG 嵌入（config/systems/episodic/rag_default.yaml 的 embed_model）
 ALIBABA_API_KEY=你的_阿里云_Key
 ALIBABA_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ALIBABA_EMBED_MODEL=text-embedding-v4
@@ -83,7 +96,7 @@ LLM_PROVIDER=deepseek
 
 仓库提供基于 **启动时固定配置 + 线程级会话状态** 的 HTTP / SSE 对话服务（非「每次请求携带完整 config」模式）。
 
-启动示例（PowerShell）：
+### Legacy 配置（默认）
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -91,6 +104,7 @@ python -m m_agent.api.chat_api `
   --host 127.0.0.1 `
   --port 8777 `
   --config config/agents/chat/chat_controller.yaml `
+  --runtime-profile legacy `
   --idle-flush-seconds 1800 `
   --history-max-rounds 12 `
   --schedule-beat-seconds 10 `
@@ -99,31 +113,68 @@ python -m m_agent.api.chat_api `
   --session-ttl-seconds 43200
 ```
 
-启动后可访问：
+（若 YAML 中已是 `runtime.profile: legacy`，可省略 `--runtime-profile legacy`。）
+
+### Think-life 配置
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m m_agent.api.chat_api `
+  --host 127.0.0.1 `
+  --port 8777 `
+  --config config/agents/chat/chat_controller.yaml `
+  --runtime-profile think_life `
+  --idle-flush-seconds 18000 `
+  --history-max-rounds 12 `
+  --schedule-beat-seconds 10 `
+  --schedule-busy-retry-seconds 5 `
+  --users-db config/users/users.json `
+  --session-ttl-seconds 43200
+```
+
+也可在 `chat_controller.yaml` 里写 `runtime.profile: think_life`，则无需传 `--runtime-profile`。
+
+Think-life 参数（每事务最大委托次数、Scene 上下文条数、是否抢占等）在同文件的 `runtime.think_life` 下配置。
+
+### 启动后
 
 - Swagger：`http://127.0.0.1:8777/docs`
 - OpenAPI JSON：`http://127.0.0.1:8777/openapi.json`
 
 完整接口说明、认证、线程事件与日程等见：**[docs/chat_api/README.md](docs/chat_api/README.md)**。
 
+### Bash（Linux / macOS）
+
+```bash
+export PYTHONPATH=src
+python -m m_agent.api.chat_api \
+  --host 127.0.0.1 \
+  --port 8777 \
+  --config config/agents/chat/chat_controller.yaml \
+  --runtime-profile think_life
+```
 
 
-## 事实记忆系统（Workspace-Mem）
 
-Workspace-Mem为独立研发的基于证据驱动的记忆系统，该系统能够实现**不同强度的记忆推理**和**不同来源的证据的合并整理**，使得智能体能同时使用多种不同来源，不同结构的记忆库。能在对情景信息进行精准的召回和分析的情况下应对现实场景中错综复杂的实体级别的问题。
+## 本仓库的情景记忆（简单 RAG）
 
-![pipeline_img](docs/pipeline_img_zh.png)
-**图 1.** Workspace-Mem的检索框架展示 
+Chat 栈默认使用 **RAG 情景后端**（`SimpleRagEpisodicBackend`），配置见 `config/systems/episodic/rag_default.yaml`：每轮与 flush 时写入用户目录下的向量索引，经 `shallow_recall` / `deep_recall` 检索。
 
-当前的记忆系统仍在进行研发中，当前实现的版本已在纯情景记忆库**LOCOMO**中展现出具有竞争力的效果：
-![LOCOMO_eval_img](docs/LOCOMO_eval_zh.png)
-**图 2.** Workspace-Mem在LOCOMO数据集上的效果横向对比  
-关于该项目在复杂输入环境与复杂理解环境中的记忆效果的相关基准和测试结果将在近期展示，敬请期待...
+- **RAG 索引**：`data/memory/chat-api/<用户>/episodic/`（`chunks.jsonl`、`embeddings.npy`）
+- **对话归档**（flush）：`data/memory/chat-api/<用户>/dialogues/`
+- **Scene log**（Think-life）：`data/memory/chat-api/<用户>/scene/<thread_id>.jsonl` — 跨事务、按时间序的「讲了什么 / 做了什么」记录
+- **与 WM 区别**：WM 按 **事务** 隔离（Think-life）或按 conversation 段（legacy），为进程内热上下文；episodic / Scene 可跨轮检索或按时间轴阅读
 
-更多实现细节与工程约定（例如 `episodes → scene → atomic facts` 的生成与数据目录组织）建议从下面文档开始读：
+开发细节见 **[docs/systems-plugin-development.zh-CN.md §3.4.1](docs/systems-plugin-development.zh-CN.md)**；`GET .../memory/state` 返回 `thread_state.episodic_persistence` 可查看当前路径。
 
-- **[scripts/run_locomo/README.md](scripts/run_locomo/README.md)**（配置驱动的工作流与数据目录说明）
-- **[docs/project-structure.md](docs/project-structure.md)**（代码/脚本/路径约定）
+## WorkspaceMem（完整记忆栈与评测）
+
+基于证据驱动的 **MemoryAgent / MemoryCore** 及 **LoCoMo / LongMemEval / REALTALK** 评测管线已迁至独立仓库：
+
+**[F:/AI/WorkspaceMem](F:/AI/WorkspaceMem)**（`workspace_mem` 包）
+
+- **[docs/project-structure.md](docs/project-structure.md)** — M-Agent 目录约定
+- **[src/m_agent/systems/README.zh-CN.md](src/m_agent/systems/README.zh-CN.md)** — 可插拔子系统说明
 
 ---
 
@@ -145,6 +196,7 @@ pytest
 | [docs/project-structure.md](docs/project-structure.md) | 目录约定与常用命令 |
 | [scripts/run_locomo/README.md](scripts/run_locomo/README.md) | LoCoMo 配置与各子脚本详解 |
 | [docs/chat_api/README.md](docs/chat_api/README.md) | Chat API 完整参考 |
+| [docs/think-life-runtime-spec.zh-CN.md](docs/think-life-runtime-spec.zh-CN.md) | Think-life 运行时规格 |
 | [tools/M-Agent-UI/API.md](tools/M-Agent-UI/API.md) | 前端对接 API 说明 |
 
 ---

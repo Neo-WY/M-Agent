@@ -7,9 +7,22 @@
 
 
 ## How to Run
-### Server side
-- **Run the agent as a service (FastAPI + SSE)**: create a run, subscribe to its event stream, fetch the final result, and maintain thread-level conversation state.
+
+### Server side (Chat API)
+
+Run the agent as a **long-lived HTTP / SSE service** (`python -m m_agent.api.chat_api`). You create a run per user message, subscribe to the event stream, and read the final result while the server keeps **thread-level** session state.
+
+Two **runtime profiles** are available (see `runtime.profile` in [`config/agents/chat/chat_controller.yaml`](config/agents/chat/chat_controller.yaml)):
+
+| Profile | Purpose |
+| --- | --- |
+| **`legacy`** (default) | Single-turn-style chat loop: perception → thinking → execution → thinking summarizes the **answer** returned by the API. |
+| **`think_life`** | Product runtime: stimuli go through a **perception bus**, **transaction-scoped WM**, chronological **Scene log**, and user-visible text only via the **`reply_to_user`** tool. Schedule heartbeat and execution feedback are integrated. Spec: **[docs/think-life-runtime-spec.zh-CN.md](docs/think-life-runtime-spec.zh-CN.md)**. |
+
+Enable Think-life either in YAML (`runtime.profile: think_life`) or at startup with `--runtime-profile think_life` (CLI overrides YAML).
+
 ### Client side
+
 - **M-Agent-UI**: the simplest information-interaction surface **[available now]**
 - **M-Agent-desktop**: a desktop-form personal assistant
 
@@ -56,17 +69,16 @@ pip install -e .
 Create a `.env` file in the project root and fill in keys / base URLs as needed. Common entries are listed below (defer to in-repo config comments for the source of truth):
 
 ```dotenv
-# MemoryCore LLM (e.g. src/m_agent/load_model/OpenAIcall.py)
+# Chat / RAG LLM (e.g. src/m_agent/load_model/OpenAIcall.py)
 # Fill in either API_SECRET_KEY or OPENAI_API_KEY
 API_SECRET_KEY=YOUR_OPENAI_COMPATIBLE_KEY
 OPENAI_API_KEY=
 BASE_URL=https://api.openai.com/v1
 
-# Agent model (LoCoMo defaults may point to gpt-4o-mini etc.;
-# MemoryAgent will map keys to the OPENAI_* variables LangChain expects)
+# Chat model (config/agents/chat/chat_model.yaml)
 DEEPSEEK_API_KEY=YOUR_DEEPSEEK_KEY
 
-# Embedding (embed_provider, see config/memory/core/*.yaml)
+# RAG embedding (config/systems/episodic/rag_default.yaml)
 ALIBABA_API_KEY=YOUR_ALIBABA_KEY
 ALIBABA_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ALIBABA_EMBED_MODEL=text-embedding-v4
@@ -84,7 +96,7 @@ LLM_PROVIDER=deepseek
 
 The repo ships an HTTP / SSE chat service built on **fixed startup-time config + thread-level session state** (i.e. *not* the "send full config with every request" pattern).
 
-Startup example (PowerShell):
+### Legacy profile (default)
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -92,6 +104,7 @@ python -m m_agent.api.chat_api `
   --host 127.0.0.1 `
   --port 8777 `
   --config config/agents/chat/chat_controller.yaml `
+  --runtime-profile legacy `
   --idle-flush-seconds 1800 `
   --history-max-rounds 12 `
   --schedule-beat-seconds 10 `
@@ -100,33 +113,65 @@ python -m m_agent.api.chat_api `
   --session-ttl-seconds 43200
 ```
 
-Once running:
+(`--runtime-profile legacy` is optional when `runtime.profile` in the YAML is already `legacy`.)
+
+### Think-life profile
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m m_agent.api.chat_api `
+  --host 127.0.0.1 `
+  --port 8777 `
+  --config config/agents/chat/chat_controller.yaml `
+  --runtime-profile think_life `
+  --idle-flush-seconds 1800 `
+  --history-max-rounds 12 `
+  --schedule-beat-seconds 10 `
+  --schedule-busy-retry-seconds 5 `
+  --users-db config/users/users.json `
+  --session-ttl-seconds 43200
+```
+
+Or set `runtime.profile: think_life` in `chat_controller.yaml` and omit `--runtime-profile`.
+
+Think-life tuning (delegates per transaction, Scene context window, preemption) lives under `runtime.think_life` in the same YAML file.
+
+### After startup
 
 - Swagger UI: `http://127.0.0.1:8777/docs`
 - OpenAPI JSON: `http://127.0.0.1:8777/openapi.json`
 
 Full API reference, authentication, thread events and schedule details: **[docs/chat_api/README.md](docs/chat_api/README.md)**.
 
+### Bash (Linux / macOS)
+
+```bash
+export PYTHONPATH=src
+python -m m_agent.api.chat_api \
+  --host 127.0.0.1 \
+  --port 8777 \
+  --config config/agents/chat/chat_controller.yaml \
+  --runtime-profile think_life
+```
 
 
-## Episodic Memory System (Workspace-Mem)
 
-**Workspace-Mem** is an in-house, evidence-driven memory system. It supports **memory reasoning at varying intensities** and **fusion of evidence from heterogeneous sources**, allowing the agent to operate over multiple memory stores with different origins and structures simultaneously. With precise recall and analysis over episodic information, it can handle the kind of intricate, entity-level questions that arise in real-world scenarios.
+## Episodic memory in this repo (simple RAG)
 
-![pipeline_img](docs/pipeline_img_zh.png)
-**Figure 1.** Overview of the Workspace-Mem retrieval framework. *(figure currently labeled in Chinese; an English version is on the way)*
+The **chat stack** uses a lightweight **RAG episodic backend** (`SimpleRagEpisodicBackend`) configured via `config/systems/episodic/rag_default.yaml`. It chunks dialogue, embeds locally, and serves `shallow_recall` / `deep_recall` through the pluggable `systems` layer.
 
-The memory system is still under active development. The current implementation already shows competitive performance on the pure-episodic benchmark **LoCoMo**:
+With **Think-life**, a separate **Scene log** (chronological, cross-transaction narrative) is stored under `data/memory/chat-api/<user>/scene/<thread_id>.jsonl`, alongside episodic RAG and dialogue archives.
 
-![LOCOMO_eval_img](docs/LOCOMO_eval_zh.png)
-**Figure 2.** Side-by-side comparison of Workspace-Mem on LoCoMo. *(figure currently labeled in Chinese; an English version is on the way)*
+## WorkspaceMem (full memory stack + benchmarks)
 
-Benchmarks and results in more complex input / understanding settings will be released soon — stay tuned.
+The evidence-driven **MemoryAgent / MemoryCore** implementation and **LoCoMo / LongMemEval / REALTALK** evaluation pipelines live in the sibling repository:
 
-For implementation details and engineering conventions (e.g. how `episodes → scene → atomic facts` are generated, and how data directories are organized), start here:
+**[F:/AI/WorkspaceMem](F:/AI/WorkspaceMem)** (`workspace_mem` Python package)
 
-- **[scripts/run_locomo/README.md](scripts/run_locomo/README.md)** (config-driven workflow and data directory layout)
-- **[docs/project-structure.md](docs/project-structure.md)** (code / scripts / path conventions)
+Install and run eval from that repo; M-Agent intentionally does not vendor those scripts anymore.
+
+- **[docs/project-structure.md](docs/project-structure.md)** — M-Agent layout
+- **[src/m_agent/systems/README.md](src/m_agent/systems/README.md)** — plug-in contracts
 
 ---
 
@@ -148,6 +193,7 @@ For markers and policy, see `[tool.pytest.ini_options]` in `pyproject.toml`.
 | [docs/project-structure.md](docs/project-structure.md) | Directory conventions and common commands |
 | [scripts/run_locomo/README.md](scripts/run_locomo/README.md) | LoCoMo configuration and per-script reference |
 | [docs/chat_api/README.md](docs/chat_api/README.md) | Full Chat API reference |
+| [docs/think-life-runtime-spec.zh-CN.md](docs/think-life-runtime-spec.zh-CN.md) | Think-life runtime spec (Chinese) |
 | [tools/M-Agent-UI/API.md](tools/M-Agent-UI/API.md) | Frontend integration API |
 
 ---

@@ -1,0 +1,205 @@
+"""Structured execution feedback + premature-reply gating for Think-life."""
+from __future__ import annotations
+
+import copy
+import re
+from typing import Any, Dict, List, Optional
+
+from m_agent.layers.perception.contracts import PerceptionInput
+from m_agent.runtime.think_life.contracts import Stimulus, StimulusKind
+
+_MULTI_STEP_MARKERS = (
+    "一周",
+    "七天",
+    "7天",
+    "每天",
+    "每日",
+    "多个",
+    "分别",
+    "批量",
+    "全部",
+    "逐个",
+    "each day",
+    "every day",
+    "daily",
+    "for a week",
+    "for the week",
+    "whole week",
+    "multiple",
+)
+
+
+def looks_like_multi_step_request(text: str) -> bool:
+    """Heuristic: user text likely needs more than one tool delegate."""
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    for marker in _MULTI_STEP_MARKERS:
+        if marker.lower() in lowered:
+            return True
+    if re.search(r"\b\d+\s*(个|条|封|次|天|items?|times?)\b", lowered):
+        return True
+    return False
+
+
+def extract_last_tool_step(tool_history: Any) -> Dict[str, Any]:
+    """Summarize the most recent tool call from controller history."""
+    if not isinstance(tool_history, list):
+        return {}
+    for item in reversed(tool_history):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("tool_name", "") or "").strip()
+        if not name:
+            continue
+        result = item.get("result")
+        facts: Dict[str, Any] = {"tool_name": name}
+        if isinstance(result, dict):
+            facts["success"] = bool(result.get("success", True))
+            facts["action"] = str(result.get("action", "") or "").strip() or None
+            if result.get("count") is not None:
+                facts["count"] = int(result.get("count") or 0)
+            facts["answer"] = str(
+                result.get("answer", result.get("message", "")) or ""
+            ).strip() or None
+            facts["needs_clarification"] = bool(result.get("needs_clarification"))
+            facts["partial"] = bool(result.get("partial"))
+        elif result is not None:
+            facts["answer"] = str(result).strip()
+        return facts
+    return {}
+
+
+def feedback_summary_from_tool_history(tool_history: Any) -> str:
+    """Prefer structured tool output over execution-layer LLM summary."""
+    step = extract_last_tool_step(tool_history)
+    if not step:
+        return ""
+    parts: List[str] = []
+    name = step.get("tool_name")
+    if name:
+        parts.append(f"tool={name}")
+    action = step.get("action")
+    if action:
+        parts.append(f"action={action}")
+    if step.get("count") is not None:
+        parts.append(f"count={step['count']}")
+    if step.get("success") is False:
+        parts.append("success=false")
+    if step.get("partial") is True:
+        parts.append("partial=true")
+    answer = step.get("answer")
+    if answer:
+        parts.append(f"result={answer}")
+    return "; ".join(parts)
+
+
+def premature_reply_block_reason(
+    *,
+    pending_user_request: str,
+    stimulus: Stimulus,
+) -> Optional[str]:
+    """Return a block reason when answer_directly is likely too early."""
+    if stimulus.kind != StimulusKind.EXECUTION_FEEDBACK:
+        return None
+    pending = str(pending_user_request or "").strip()
+    if not looks_like_multi_step_request(pending):
+        return None
+
+    tool_history = stimulus.payload.get("tool_history")
+    step = extract_last_tool_step(tool_history)
+    if not step:
+        return "multi_step_no_tool_evidence"
+
+    tool_name = str(step.get("tool_name", "") or "").strip()
+    count = step.get("count")
+    if step.get("partial"):
+        return "schedule_manage_partial_step"
+    if tool_name == "schedule_manage" and count == 1 and looks_like_multi_step_request(pending):
+        return "schedule_manage_created_only_one"
+
+    if tool_name == "schedule_query":
+        # Query with zero items on multi-step create request — still in progress
+        if count == 0 and any(token in pending for token in ("安排", "创建", "设", "schedule", "create")):
+            return "schedule_query_empty_while_creating"
+
+    return None
+
+
+def build_feedback_user_message(
+    *,
+    pending_user_request: str,
+    tool_history: Any,
+    llm_summary: str = "",
+) -> str:
+    """User-visible plan input after one delegate step."""
+    structured = feedback_summary_from_tool_history(tool_history)
+    pending = str(pending_user_request or "").strip()
+    multi = looks_like_multi_step_request(pending)
+
+    parts = [
+        "[Execution feedback] One delegate step finished.",
+        "The user's full request may still be incomplete — do not assume all work is done.",
+    ]
+    if pending:
+        parts.append(f"Original user request: {pending}")
+    if structured:
+        parts.append(f"Structured tool result: {structured}")
+    elif llm_summary:
+        parts.append(f"Execution note (secondary): {llm_summary}")
+
+    if multi:
+        parts.append(
+            "This request likely needs multiple tool steps (one tool_name per plan round). "
+            "Continue with mode=execute and the next single tool_name unless you verified completion "
+            "(e.g. schedule_query). Set request_complete=true only when truly finished."
+        )
+    else:
+        parts.append(
+            "Plan next: mode=execute with one tool_name for another step, "
+            "or answer_directly when the user request is satisfied."
+        )
+    return " ".join(parts)
+
+
+def build_completion_nudge_message(block_reason: str) -> str:
+    templates = {
+        "schedule_manage_partial_step": (
+            "[System gate] schedule_manage returned partial=true (only one item created for a bulk-style request). "
+            "Do NOT answer_directly. Plan mode=execute with tool_name=schedule_manage for the next single item."
+        ),
+        "schedule_manage_created_only_one": (
+            "[System gate] schedule_manage only created count=1, but the user asked for a multi-day "
+            "or repeating schedule. Do NOT answer_directly. Plan mode=execute with tool_name=schedule_manage "
+            "to create the next single item (one date/time/title per call), or schedule_query to verify."
+        ),
+        "schedule_query_empty_while_creating": (
+            "[System gate] Schedules are not created yet for this multi-step request. "
+            "Plan mode=execute with tool_name=schedule_manage for the next item."
+        ),
+        "multi_step_no_tool_evidence": (
+            "[System gate] Multi-step user request but no tool evidence yet. "
+            "Plan mode=execute with one tool_name; do not answer_directly."
+        ),
+    }
+    return templates.get(
+        block_reason,
+        "[System gate] User request likely incomplete. Continue with mode=execute (one tool_name).",
+    )
+
+
+def augment_perception_with_nudge(perception: PerceptionInput, nudge: str) -> PerceptionInput:
+    """Copy perception with an appended gate nudge in the user message."""
+    base = str(perception.user_message or "").strip()
+    merged = f"{base}\n\n{nudge}".strip()
+    ctx = copy.deepcopy(dict(perception.system_context or {}))
+    ctx["completion_gate_nudge"] = str(nudge or "").strip()
+    return PerceptionInput(
+        user_message=merged,
+        thread_id=perception.thread_id,
+        conversation_id=perception.conversation_id,
+        history_messages=list(perception.history_messages or []),
+        source=perception.source,
+        system_context=ctx,
+        attachments=perception.attachments,
+    )

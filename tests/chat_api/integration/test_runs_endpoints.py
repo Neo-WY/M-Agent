@@ -32,7 +32,7 @@ def test_create_run_rejects_empty_message() -> None:
         response = client.post("/v1/chat/runs", json=run_payload(message="", thread_id="demo-thread"))
 
     assert response.status_code == 400
-    assert response.json()["error"] == "message is empty"
+    assert response.json()["error"] in {"message is empty", "message and attachments are both empty"}
 
 
 def test_run_lifecycle_snapshot_and_event_stream() -> None:

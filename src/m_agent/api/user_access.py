@@ -19,6 +19,7 @@ import yaml
 
 from m_agent.config_paths import (
     CHAT_CONTROLLER_RUNTIME_PROMPT_CONFIG_PATH,
+    DEFAULT_CHAT_MODEL_CONFIG_PATH,
     DEFAULT_EMAIL_AGENT_CONFIG_PATH,
     DEFAULT_SCHEDULE_AGENT_CONFIG_PATH,
     resolve_related_config_path,
@@ -30,8 +31,7 @@ DEFAULT_USERS_ROOT_DIR = PROJECT_ROOT / "config" / "users"
 DEFAULT_USERS_DB_PATH = DEFAULT_USERS_ROOT_DIR / "users.json"
 
 _USER_CHAT_CONFIG_NAME = "chat.yaml"
-_USER_MEMORY_AGENT_CONFIG_NAME = "memory_agent.params.yaml"
-_USER_MEMORY_CORE_CONFIG_NAME = "memory_core.params.yaml"
+_USER_MODEL_CONFIG_NAME = "chat_model.params.yaml"
 _USER_CHAT_RUNTIME_NAME = "chat_runtime.yaml"
 
 _PASSWORD_PBKDF2_ITERATIONS = 150_000
@@ -39,34 +39,24 @@ _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
 
 _BASIC_EDITABLE_FIELDS: Dict[str, set[str]] = {
     "chat": {"chat_assistant_name", "chat_persona_prompt"},
-    "memory_agent": set(),
-    "memory_core": set(),
+    "model": set(),
 }
 _ADVANCED_EXTRA_FIELDS: Dict[str, set[str]] = {
     "chat": {"chat_user_name", "persist_memory", "enabled_tools", "tool_defaults", "thread_id"},
-    "memory_agent": {
+    "model": {
         "model_name",
         "agent_temperature",
         "recursion_limit",
         "retry_recursion_limit",
-        "detail_search_defaults",
         "network_retry_attempts",
         "network_retry_backoff_seconds",
         "network_retry_backoff_multiplier",
         "network_retry_max_backoff_seconds",
     },
-    "memory_core": {
-        "workflow_id",
-        "memory_owner_name",
-        "memory_similarity_threshold",
-        "memory_top_k",
-        "memory_use_threshold",
-        "embed_provider",
-    },
 }
 _ADVANCED_EDITABLE_FIELDS: Dict[str, set[str]] = {
     section: set(_BASIC_EDITABLE_FIELDS.get(section, set())) | set(_ADVANCED_EXTRA_FIELDS.get(section, set()))
-    for section in ("chat", "memory_agent", "memory_core")
+    for section in ("chat", "model")
 }
 _CONFIG_FIELD_SCHEMAS: Dict[str, Dict[str, Dict[str, str]]] = {
     "chat": {
@@ -99,14 +89,14 @@ _CONFIG_FIELD_SCHEMAS: Dict[str, Dict[str, Dict[str, str]]] = {
             "description": "Default thread id for chat runs.",
         },
     },
-    "memory_agent": {
+    "model": {
         "model_name": {
             "type": "string",
-            "description": "Primary model name used by memory agent.",
+            "description": "Primary chat model name for execution/thinking layers.",
         },
         "agent_temperature": {
             "type": "number",
-            "description": "Sampling temperature for memory-agent generation.",
+            "description": "Sampling temperature for chat generation.",
         },
         "recursion_limit": {
             "type": "integer",
@@ -115,10 +105,6 @@ _CONFIG_FIELD_SCHEMAS: Dict[str, Dict[str, Dict[str, str]]] = {
         "retry_recursion_limit": {
             "type": "integer",
             "description": "Retry recursion limit when network-bound tool calls fail.",
-        },
-        "detail_search_defaults": {
-            "type": "object",
-            "description": "Default detail-search parameters used by memory tools.",
         },
         "network_retry_attempts": {
             "type": "integer",
@@ -135,32 +121,6 @@ _CONFIG_FIELD_SCHEMAS: Dict[str, Dict[str, Dict[str, str]]] = {
         "network_retry_max_backoff_seconds": {
             "type": "number",
             "description": "Maximum backoff cap for network retries.",
-        },
-    },
-    "memory_core": {
-        "workflow_id": {
-            "type": "string",
-            "description": "Workflow namespace used to isolate memory data.",
-        },
-        "memory_owner_name": {
-            "type": "string",
-            "description": "Owner name shown in memory summaries.",
-        },
-        "memory_similarity_threshold": {
-            "type": "number",
-            "description": "Similarity threshold for recall matching.",
-        },
-        "memory_top_k": {
-            "type": "integer",
-            "description": "Top-k candidate count for memory recall.",
-        },
-        "memory_use_threshold": {
-            "type": "boolean",
-            "description": "Whether similarity threshold filtering is enabled.",
-        },
-        "embed_provider": {
-            "type": "string",
-            "description": "Embedding provider used by memory core.",
         },
     },
 }
@@ -370,18 +330,14 @@ class UserAccountStore:
             display_name=display_name,
         )
 
-    def _resolve_config_chain(self, chat_config_path: Path) -> tuple[Path, Path, Path]:
+    def _resolve_config_chain(self, chat_config_path: Path) -> tuple[Path, Path]:
         chat_config = _load_yaml(chat_config_path)
-        memory_agent_path = resolve_related_config_path(
+        model_path = resolve_related_config_path(
             chat_config_path,
-            chat_config.get("memory_agent_config_path"),
+            chat_config.get("model_config_path"),
+            default_path=DEFAULT_CHAT_MODEL_CONFIG_PATH,
         )
-        memory_agent_config = _load_yaml(memory_agent_path)
-        memory_core_path = resolve_related_config_path(
-            memory_agent_path,
-            memory_agent_config.get("memory_core_config_path"),
-        )
-        return chat_config_path, memory_agent_path, memory_core_path
+        return chat_config_path, model_path
 
     @staticmethod
     def _resolve_runtime_prompt_path(
@@ -418,6 +374,25 @@ class UserAccountStore:
                     changed = True
         return changed
 
+    @staticmethod
+    def _migrate_legacy_chat_config(
+        user_chat_config: Dict[str, Any],
+        *,
+        base_chat_config: Dict[str, Any],
+    ) -> bool:
+        """Upgrade pre-three-layer user chat.yaml files to the current schema."""
+        changed = False
+        if not str(user_chat_config.get("model_config_path", "") or "").strip():
+            user_chat_config["model_config_path"] = "./chat_model.params.yaml"
+            changed = True
+        if "systems" not in user_chat_config and isinstance(base_chat_config.get("systems"), dict):
+            user_chat_config["systems"] = deepcopy(base_chat_config["systems"])
+            changed = True
+        if "execution" not in user_chat_config and isinstance(base_chat_config.get("execution"), dict):
+            user_chat_config["execution"] = deepcopy(base_chat_config["execution"])
+            changed = True
+        return changed
+
     def _sync_chat_tool_settings(
         self,
         *,
@@ -426,6 +401,9 @@ class UserAccountStore:
         base_chat_config: Dict[str, Any],
     ) -> bool:
         changed = False
+
+        if self._migrate_legacy_chat_config(user_chat_config, base_chat_config=base_chat_config):
+            changed = True
 
         if self._merge_missing_mappings(user_chat_config, base_chat_config):
             changed = True
@@ -554,12 +532,11 @@ class UserAccountStore:
         persona_prompt: Optional[str],
         workflow_id: Optional[str],
     ) -> Path:
-        chat_template_path, memory_agent_template_path, memory_core_template_path = self._resolve_config_chain(
+        chat_template_path, model_template_path = self._resolve_config_chain(
             self.base_chat_config_path
         )
         chat_config = _load_yaml(chat_template_path)
-        memory_agent_config = _load_yaml(memory_agent_template_path)
-        memory_core_config = _load_yaml(memory_core_template_path)
+        model_config = _load_yaml(model_template_path)
         chat_runtime_template_path = self._resolve_runtime_prompt_path(
             chat_template_path,
             chat_config,
@@ -571,8 +548,8 @@ class UserAccountStore:
             raise UserAccessError(f"user config directory already exists: {user_dir}", status_code=409)
         user_dir.mkdir(parents=True, exist_ok=False)
 
-        memory_agent_base_config_path = self._relative_or_absolute_path(
-            memory_agent_template_path,
+        model_base_config_path = self._relative_or_absolute_path(
+            model_template_path,
             start_dir=user_dir,
         )
         email_agent_template_path = resolve_related_config_path(
@@ -586,7 +563,7 @@ class UserAccountStore:
             default_path=DEFAULT_SCHEDULE_AGENT_CONFIG_PATH,
         )
 
-        chat_config["memory_agent_config_path"] = f"./{_USER_MEMORY_AGENT_CONFIG_NAME}"
+        chat_config["model_config_path"] = f"./{_USER_MODEL_CONFIG_NAME}"
         chat_config["runtime_prompt_config_path"] = f"./runtime/{_USER_CHAT_RUNTIME_NAME}"
         chat_config["email_agent_config_path"] = self._relative_or_absolute_path(
             email_agent_template_path,
@@ -602,26 +579,13 @@ class UserAccountStore:
         if isinstance(persona_prompt, str) and persona_prompt.strip():
             chat_config["chat_persona_prompt"] = persona_prompt.strip()
 
-        memory_agent_config["base_config_path"] = memory_agent_base_config_path
-        memory_agent_config["memory_core_config_path"] = f"./{_USER_MEMORY_CORE_CONFIG_NAME}"
-        memory_agent_config["thread_id"] = f"{_safe_slug(username, fallback='user')}-memory-agent"
-        memory_agent_config.pop("planner_prompt", None)
-        memory_agent_config.pop("system_prompt", None)
-        memory_agent_config.pop("runtime_prompt_config_path", None)
-
-        default_workflow_id = f"user_{_safe_slug(username, fallback='user')}"
-        memory_core_config["workflow_id"] = str(workflow_id or default_workflow_id)
-        memory_core_config.pop("runtime_prompt_config_path", None)
-        if assistant_name.strip():
-            memory_core_config["memory_owner_name"] = assistant_name.strip()
+        model_config["base_config_path"] = model_base_config_path
 
         chat_user_config_path = user_dir / _USER_CHAT_CONFIG_NAME
-        memory_agent_user_config_path = user_dir / _USER_MEMORY_AGENT_CONFIG_NAME
-        memory_core_user_config_path = user_dir / _USER_MEMORY_CORE_CONFIG_NAME
+        model_user_config_path = user_dir / _USER_MODEL_CONFIG_NAME
 
         _write_yaml(chat_user_config_path, chat_config)
-        _write_yaml(memory_agent_user_config_path, memory_agent_config)
-        _write_yaml(memory_core_user_config_path, memory_core_config)
+        _write_yaml(model_user_config_path, model_config)
         _copy_file(
             chat_runtime_template_path,
             user_dir / "runtime" / _USER_CHAT_RUNTIME_NAME,
@@ -724,15 +688,14 @@ class UserAccountStore:
             known_fields = _ADVANCED_EDITABLE_FIELDS
 
             chat_path = self._resolve_user_config_path(record)
-            _, memory_agent_path, memory_core_path = self._resolve_config_chain(chat_path)
+            _, model_path = self._resolve_config_chain(chat_path)
             section_targets: Dict[str, Dict[str, Any]] = {
                 "chat": _load_yaml(chat_path),
-                "memory_agent": _load_yaml(memory_agent_path),
-                "memory_core": _load_yaml(memory_core_path),
+                "model": _load_yaml(model_path),
             }
 
             sections_payload: Dict[str, Dict[str, Any]] = {}
-            for section in ("chat", "memory_agent", "memory_core"):
+            for section in ("chat", "model"):
                 target = section_targets[section]
                 editable_keys = sorted(list(allowed_fields[section]))
                 section_fields: Dict[str, Dict[str, Any]] = {}
@@ -810,29 +773,25 @@ class UserAccountStore:
             known_fields = _ADVANCED_EDITABLE_FIELDS
 
             chat_updates = self._resolve_section_updates(updates, "chat")
-            memory_agent_updates = self._resolve_section_updates(updates, "memory_agent")
-            memory_core_updates = self._resolve_section_updates(updates, "memory_core")
-            if not chat_updates and not memory_agent_updates and not memory_core_updates:
+            model_updates = self._resolve_section_updates(updates, "model")
+            if not chat_updates and not model_updates:
                 raise UserAccessError("no config fields provided", status_code=400)
 
             chat_path = self._resolve_user_config_path(record)
-            _, memory_agent_path, memory_core_path = self._resolve_config_chain(chat_path)
+            _, model_path = self._resolve_config_chain(chat_path)
             chat_config = _load_yaml(chat_path)
-            memory_agent_config = _load_yaml(memory_agent_path)
-            memory_core_config = _load_yaml(memory_core_path)
+            model_config = _load_yaml(model_path)
 
             changed_sections: set[str] = set()
             section_targets = {
                 "chat": chat_config,
-                "memory_agent": memory_agent_config,
-                "memory_core": memory_core_config,
+                "model": model_config,
             }
             section_updates = {
                 "chat": chat_updates,
-                "memory_agent": memory_agent_updates,
-                "memory_core": memory_core_updates,
+                "model": model_updates,
             }
-            for section in ("chat", "memory_agent", "memory_core"):
+            for section in ("chat", "model"):
                 target = section_targets[section]
                 updates_for_section = section_updates[section]
                 for key, value in updates_for_section.items():
@@ -854,10 +813,8 @@ class UserAccountStore:
 
             if "chat" in changed_sections:
                 _write_yaml(chat_path, chat_config)
-            if "memory_agent" in changed_sections:
-                _write_yaml(memory_agent_path, memory_agent_config)
-            if "memory_core" in changed_sections:
-                _write_yaml(memory_core_path, memory_core_config)
+            if "model" in changed_sections:
+                _write_yaml(model_path, model_config)
 
             record["updated_at"] = _now_iso()
             self._save_users_payload(users_payload)

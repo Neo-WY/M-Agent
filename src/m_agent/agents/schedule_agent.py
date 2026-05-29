@@ -50,6 +50,22 @@ _ADVANCE_REMINDER_MARKERS = (
 )
 
 
+_BULK_SCHEDULE_MARKERS = (
+    "一周",
+    "七天",
+    "7天",
+    "每天",
+    "每日",
+    "多个",
+    "批量",
+    "each day",
+    "every day",
+    "daily",
+    "for a week",
+    "whole week",
+)
+
+
 class ScheduleAgent:
     """Domain controller for schedule management and query."""
 
@@ -319,6 +335,9 @@ class ScheduleAgent:
             answer = f"已创建日程：{serialized['due_display']} {serialized['title']}。"
         if parsed_due.assumed_date:
             answer += " 我默认使用了最近的这个日期。"
+        partial = self._instruction_looks_bulk(instruction)
+        if partial:
+            answer += " 本次仅创建 1 条日程；若用户要求多条/重复，请继续逐条创建。"
         return self._result(
             success=True,
             tool="schedule_manage",
@@ -326,6 +345,7 @@ class ScheduleAgent:
             answer=answer,
             item=serialized,
             count=1,
+            partial=partial,
             machine={
                 "intent": "create",
                 "owner_id": owner_id,
@@ -658,6 +678,18 @@ class ScheduleAgent:
         }
 
     @staticmethod
+    def _instruction_looks_bulk(instruction: str) -> bool:
+        text = str(instruction or "").strip().lower()
+        if not text:
+            return False
+        for marker in _BULK_SCHEDULE_MARKERS:
+            if marker.lower() in text:
+                return True
+        if re.search(r"\b\d+\s*(个|条|天)\b", text):
+            return True
+        return False
+
+    @staticmethod
     def _result(
         *,
         success: bool,
@@ -669,6 +701,7 @@ class ScheduleAgent:
         items: Optional[List[Dict[str, Any]]] = None,
         candidates: Optional[List[Dict[str, Any]]] = None,
         count: int = 0,
+        partial: bool = False,
         machine: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return {
@@ -678,6 +711,7 @@ class ScheduleAgent:
             "answer": str(answer or "").strip(),
             "message": str(answer or "").strip(),
             "needs_clarification": bool(needs_clarification),
+            "partial": bool(partial),
             "item": item,
             "items": list(items or []),
             "candidates": list(candidates or []),

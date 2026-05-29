@@ -121,6 +121,19 @@ Content-Type: application/json
 
 ### Dialogues
 
+POST {{baseUrl}}/v1/chat/dialogues/import
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "migrate_legacy": true,
+  "rebuild_rag": true,
+  "index_rag": true,
+  "copy_files": true
+}
+
+###
+
 GET {{baseUrl}}/v1/chat/dialogues?thread_id={{threadId}}&limit=20&offset=0
 Authorization: Bearer {{accessToken}}
 

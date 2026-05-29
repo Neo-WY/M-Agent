@@ -1,7 +1,10 @@
+# Top-level ChatController config.
 # Used by: `python -m m_agent.api.chat_api`
-# Purpose: top-level ChatController config; points to the recall-layer MemoryAgent config below.
-# changshengEVA 20260507: 测试使用 locomo_eval_memory_agent_full_mode_E2.yaml当前版本
-memory_agent_config_path: "../memory/locomo_eval_memory_agent_full_mode_E2.yaml"
+#
+# Points at the three pluggable subsystems and the chat LLM config.
+# Subsystem parameters live only under config/systems/<name>/.
+
+model_config_path: "./chat_model.yaml"
 email_agent_config_path: "../email/gmail_email_agent.yaml"
 schedule_agent_config_path: "../schedule/schedule_agent.yaml"
 runtime_prompt_config_path: "./runtime/chat_controller_runtime.yaml"
@@ -12,45 +15,24 @@ chat_user_name: "User"
 chat_assistant_name: "Memory Assistant"
 persist_memory: true
 
-enabled_tools:
-  - "shallow_recall"
-  - "deep_recall"
-  - "get_current_time"
-  - "schedule_manage"
-  - "schedule_query"
-  - "email_ask"
-  - "email_read"
-  - "email_send"
+systems:
+  wm:       ../../systems/wm/default.yaml
+  episodic: ../../systems/episodic/rag_default.yaml
+  tools:    ../../systems/tools/default.yaml
 
-tool_defaults:
-  # Reserved controller-level limit settings.
-  __controller__:
-    max_calls_per_turn: 12
-  # Shared cap for top-level memory recall tools: shallow_recall + deep_recall.
-  memory_recall:
-    max_calls_per_turn: 8
-  get_current_time:
-    timezone_name: "Asia/Shanghai"
-  schedule_manage:
-    timezone_name: "Asia/Shanghai"
-  schedule_query:
-    timezone_name: "Asia/Shanghai"
-    limit: 10
-  email_ask:
-    mail_scope: "unread"
+runtime:
+  profile: legacy
+  think_life:
+    # max_delegates_per_transaction / max_think_rounds: omit or null = unlimited
+    scene_context_max_entries: 40
+    scene_persist_jsonl: true
+    scheduler:
+      preempt_enabled: false
+      max_preempt_per_stimulus: 3
+      default_user_priority: 10
+      default_feedback_priority: 20
+      default_heartbeat_priority: 40
 
-# Cross-turn working memory: appended per controller tool call; injected into system prompt (tail only).
-# Does not affect LT flush.
-working_memory:
-  enable: true
-  inject_max_entries: 20
-  max_stored_entries: 200
-  max_question_chars: 512
-  max_answer_chars: 1200
-  max_email_ask_items: 20
-  max_subject_chars: 120
-  max_email_body_excerpt_chars: 1500
-  max_schedule_summary_chars: 400
-  record_time_tool: true
-  # How many WM entries (tail) to embed in thread_state for UI (GET .../memory/state, SSE).
-  ui_expose_max_entries: 200
+execution:
+  max_executions_per_turn: 1
+  skip_summarize_on_direct_answer: true

@@ -1,0 +1,28 @@
+# Default Working-Memory subsystem.
+# Switching the WM system = pointing chat_controller.yaml's `systems.wm`
+# at a different YAML under config/systems/wm/.
+system: wm
+
+writer:
+  path: m_agent.systems.wm.default.defaults:DefaultWMWriter
+
+reader:
+  path: m_agent.systems.wm.default.defaults:DefaultWMReader
+
+display:
+  path: m_agent.systems.wm.default.defaults:DefaultWMDisplay
+
+# Working-memory rendering / projection parameters. Same shape as the
+# legacy `working_memory:` block in chat_controller.yaml.
+config:
+  enable: true
+  inject_max_entries: 20
+  max_stored_entries: 200
+  max_question_chars: 512
+  max_answer_chars: 1200
+  max_email_ask_items: 20
+  max_subject_chars: 120
+  max_email_body_excerpt_chars: 1500
+  max_schedule_summary_chars: 400
+  record_time_tool: true
+  ui_expose_max_entries: 200

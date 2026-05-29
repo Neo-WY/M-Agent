@@ -11,6 +11,7 @@ from m_agent.schedule.store import ANONYMOUS_OWNER_ID
 
 from .chat_api_runtime import ChatServiceRuntime, ThreadEventSink
 from .chat_api_shared import _get_thread_lock, _now_iso
+from .thread_runtime_status import THREAD_RUNTIME_STATUS
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,15 @@ class ScheduleHeartbeatCoordinator:
             user = self.user_access.get_user(username=username)
             if user is None:
                 continue
-            runtime = self.user_access.get_runtime(user=user)
+            try:
+                runtime = self.user_access.get_runtime(user=user)
+            except Exception as exc:
+                logger.warning(
+                    "Schedule heartbeat skipped user=%s (runtime unavailable): %s",
+                    username,
+                    exc,
+                )
+                continue
             yield user.username, runtime
 
     def _wire_runtime_sink(self, runtime: ChatServiceRuntime) -> None:
@@ -162,6 +171,88 @@ class ScheduleHeartbeatCoordinator:
                 target_thread_id = str(getattr(schedule_item, "thread_id", "") or "").strip() or runtime.default_thread_id
                 payload = self._schedule_event_payload(schedule_item)
                 self._emit_thread_event(target_thread_id, "schedule_due", payload)
+
+                profile = str(getattr(runtime, "runtime_profile", "legacy") or "legacy")
+                if profile == "think_life" and runtime.think_life is not None:
+                    run_id = f"schedule_run_{uuid.uuid4().hex}"
+                    owner_id = str(getattr(schedule_item, "owner_id", "") or owner_id)
+                    schedule_id = str(getattr(schedule_item, "schedule_id", "") or "")
+                    schedule_prompt = runtime._schedule_prompt(schedule_item)
+                    system_context = runtime._schedule_system_context(schedule_item)
+                    try:
+                        queued = runtime.think_life.enqueue_schedule(
+                            thread_id=target_thread_id,
+                            schedule_id=schedule_id,
+                            text=schedule_prompt,
+                            payload=system_context,
+                            run_id=run_id,
+                            owner_id=owner_id,
+                        )
+                        total_started += 1
+                        self._emit_thread_event(
+                            target_thread_id,
+                            "schedule_queued",
+                            {
+                                **payload,
+                                "status": "queued",
+                                "run_id": run_id,
+                                "stimulus_id": queued.get("stimulus_id"),
+                                "pending_count": queued.get("pending_count"),
+                                "runtime_phase": queued.get("runtime_phase"),
+                            },
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Think-life schedule enqueue failed owner_id=%s thread_id=%s schedule_id=%s",
+                            owner_id,
+                            target_thread_id,
+                            schedule_id,
+                        )
+                        error_text = str(exc or "schedule enqueue failed").strip() or "schedule enqueue failed"
+                        schedule_service.release_lease(
+                            owner_id=owner_id,
+                            thread_id=target_thread_id,
+                            schedule_id=schedule_id,
+                            reason="enqueue_failed",
+                            retry_after_seconds=self.busy_retry_seconds,
+                        )
+                        schedule_service.mark_failed(
+                            owner_id=owner_id,
+                            thread_id=target_thread_id,
+                            schedule_id=schedule_id,
+                            error=error_text,
+                        )
+                        total_failed += 1
+                        self._emit_thread_event(
+                            target_thread_id,
+                            "schedule_failed",
+                            self._schedule_event_payload(schedule_item, run_id=run_id, error=error_text),
+                        )
+                    continue
+
+                if THREAD_RUNTIME_STATUS.is_busy(target_thread_id, default_profile=profile):
+                    schedule_service.release_lease(
+                        owner_id=str(getattr(schedule_item, "owner_id", "") or owner_id),
+                        thread_id=target_thread_id,
+                        schedule_id=str(getattr(schedule_item, "schedule_id", "") or ""),
+                        reason="thread_busy",
+                        retry_after_seconds=self.busy_retry_seconds,
+                    )
+                    total_busy_retried += 1
+                    self._emit_thread_event(
+                        target_thread_id,
+                        "schedule_busy_retry",
+                        {
+                            **payload,
+                            "status": "pending",
+                            "retry_after_seconds": self.busy_retry_seconds,
+                            "busy_reason": THREAD_RUNTIME_STATUS.snapshot(
+                                target_thread_id,
+                                default_profile=profile,
+                            ).busy_reason,
+                        },
+                    )
+                    continue
 
                 thread_lock = _get_thread_lock(target_thread_id)
                 if not thread_lock.acquire(blocking=False):
@@ -265,9 +356,43 @@ class ScheduleHeartbeatCoordinator:
 
     def health_payload(self) -> Dict[str, Any]:
         with self._stats_lock:
+            worker_alive = bool(self._worker is not None and self._worker.is_alive())
+            last_error = self._last_error
+            if not worker_alive:
+                status = "unhealthy"
+            elif last_error:
+                status = "degraded"
+            else:
+                status = "healthy"
             return {
                 "enabled": True,
-                "worker_alive": bool(self._worker is not None and self._worker.is_alive()),
+                "status": status,
+                "worker": {
+                    "alive": worker_alive,
+                    "created_at": self.created_at,
+                },
+                "scheduler": {
+                    "beat_interval_seconds": self.beat_interval_seconds,
+                    "interval_seconds": self.beat_interval_seconds,
+                    "batch_limit": self.batch_limit,
+                    "busy_retry_seconds": self.busy_retry_seconds,
+                    "next_beat_due_at": self._next_beat_due_at(),
+                },
+                "counters": {
+                    "beats_total": self._beats_total,
+                    "schedule_leased_total": self._items_leased,
+                    "schedule_started_total": self._items_started,
+                    "schedule_completed_total": self._items_completed,
+                    "schedule_failed_total": self._items_failed,
+                    "schedule_busy_retries_total": self._items_busy_retried,
+                },
+                "last_beat": {
+                    "started_at": self._last_beat_started_at,
+                    "finished_at": self._last_beat_finished_at,
+                },
+                "last_error": last_error,
+                # Legacy flat keys (deprecated, kept for older clients)
+                "worker_alive": worker_alive,
                 "created_at": self.created_at,
                 "beat_interval_seconds": self.beat_interval_seconds,
                 "interval_seconds": self.beat_interval_seconds,
@@ -282,5 +407,4 @@ class ScheduleHeartbeatCoordinator:
                 "last_beat_started_at": self._last_beat_started_at,
                 "last_beat_finished_at": self._last_beat_finished_at,
                 "next_beat_due_at": self._next_beat_due_at(),
-                "last_error": self._last_error,
             }

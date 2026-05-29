@@ -11,7 +11,21 @@ from .chat_api_shared import (
 
 protocol_logger = logging.getLogger("m_agent.api.protocol")
 
-_PROTOCOL_SSE_EVENTS = {
+# =====================================================================
+# FROZEN SSE event allow-list — frontend contract surface.
+#
+# The chat API only emits SSE events whose ``type`` belongs to this set;
+# anything else (e.g. a custom-backend log line that the projector did
+# not recognise) is dropped at :py:func:`_log_protocol_event`. Treat this
+# as a versioned contract: adding a new event = a frontend-visible
+# protocol change. Editing this list requires a docs update in
+# ``docs/m_agent_pipeline.md`` and a frontend coordination note.
+#
+# Three-layer streaming events (``thinking_*`` / ``execution_*``) are
+# additionally guarded by ``ChatServiceRuntime._THREE_LAYER_STREAM_EVENTS``
+# so a misbehaving subsystem cannot inject arbitrary types.
+# =====================================================================
+_PROTOCOL_SSE_EVENTS = frozenset({
     "run_started",
     "question_strategy",
     "plan_update",
@@ -33,7 +47,19 @@ _PROTOCOL_SSE_EVENTS = {
     "flush_stage",
     "flush_completed",
     "thread_state_updated",
-}
+    # Three-layer architecture streaming events. The thinking layer publishes one
+    # ``thinking_started`` before any LLM call, then ``thinking_plan`` after
+    # the plan pass; when the plan asks for execution, ``execution_started``
+    # / ``execution_completed`` bracket the execution-layer call, and
+    # ``thinking_summary`` carries the summarize pass's outcome. The final
+    # ``thinking_completed`` always fires once the turn is done.
+    "thinking_started",
+    "thinking_plan",
+    "execution_started",
+    "execution_completed",
+    "thinking_summary",
+    "thinking_completed",
+})
 
 
 def _should_protocol_log_path(path: str) -> bool:
@@ -158,6 +184,40 @@ def _summarize_event_payload(event_type: str, payload: Dict[str, Any]) -> str:
             f"thread={state.get('thread_id')} mode={state.get('mode')} "
             f"pending_rounds={state.get('pending_rounds')}"
         )
+    if event_type == "thinking_started":
+        return (
+            f"thread={payload.get('thread_id')} conv={payload.get('conversation_id')} "
+            f"turn={payload.get('turn')} source={payload.get('source')}"
+        )
+    if event_type == "thinking_plan":
+        mode = payload.get("mode")
+        hints = payload.get("capability_hint") or []
+        hint_text = ",".join(str(h) for h in list(hints)[:3]) if isinstance(hints, list) else ""
+        return (
+            f"mode={mode} "
+            f"instruction={_short_text(payload.get('instruction'))} "
+            f"hints={hint_text or '-'}"
+        )
+    if event_type == "execution_started":
+        return (
+            f"instruction={_short_text(payload.get('instruction'))}"
+        )
+    if event_type == "execution_completed":
+        tool_names = payload.get("tool_names") or []
+        tool_text = ",".join(str(t) for t in list(tool_names)[:3]) if isinstance(tool_names, list) else ""
+        return (
+            f"tool_calls={payload.get('tool_call_count')} tools={tool_text or '-'} "
+            f"insufficient={payload.get('insufficient')} limit_reached={payload.get('limit_reached')}"
+        )
+    if event_type == "thinking_summary":
+        return (
+            f"answer={_short_text(payload.get('answer_excerpt'))} "
+            f"episode_note={_short_text(payload.get('episode_note'))}"
+        )
+    if event_type == "thinking_completed":
+        phases = payload.get("phases") or []
+        phase_text = ",".join(str(p) for p in phases) if isinstance(phases, list) else ""
+        return f"executed={payload.get('executed')} phases={phase_text or '-'}"
     return ""
 
 

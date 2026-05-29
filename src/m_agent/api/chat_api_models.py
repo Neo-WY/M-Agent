@@ -39,8 +39,7 @@ class UserLoginRequest(BaseModel):
 
 class UserConfigPatchRequest(BaseModel):
     chat: Optional[Dict[str, Any]] = None
-    memory_agent: Optional[Dict[str, Any]] = None
-    memory_core: Optional[Dict[str, Any]] = None
+    model: Optional[Dict[str, Any]] = None
 
 
 class ThreadMemoryModeRequest(BaseModel):
@@ -52,6 +51,16 @@ class ThreadMemoryFlushRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class DialogueImportRequest(BaseModel):
+    """Import on-disk dialogue JSON into the current user's ``chat-api/<user>/`` tree."""
+
+    migrate_legacy: bool = False
+    rebuild_rag: bool = False
+    index_rag: bool = True
+    copy_files: bool = True
+    dialogue_ids: Optional[list[str]] = None
+
+
 class ScheduleCreateRequest(BaseModel):
     title: Optional[str] = None
     prompt: Optional[str] = None
@@ -60,6 +69,13 @@ class ScheduleCreateRequest(BaseModel):
     original_time_text: Optional[str] = None
     source_text: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+
+class ThreadStimulusRequest(BaseModel):
+    kind: Optional[str] = "user_message"
+    text: Optional[str] = None
+    attachments: Optional[list[ChatImageAttachment]] = None
+    priority_override: Optional[int] = None
 
 
 class ScheduleUpdateRequest(BaseModel):
