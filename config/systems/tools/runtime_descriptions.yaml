@@ -1,42 +1,95 @@
 # Per-tool description prompts for the Tool-Suite subsystem.
+
 # (Previously lived under chat_controller_runtime.yaml > tools.)
+
 # The loader picks the
+
 # language at runtime; the `prompt_language` field of chat_controller.yaml
+
 # decides which to use.
+
 tools:
+
   shallow_recall:
+
     description:
-      zh: "用于普通单目标记忆查询，从已存储的聊天细节中找答案。"
-      en: "Use for ordinary single-goal memory lookup from stored chat details."
+
+      zh: "用于普通单目标记忆查询，从已存储的聊天细节中找答案。每次调用只回答一个问题。"
+
+      en: "Single-goal memory lookup from stored chat details. One question per call."
+
   deep_recall:
+
     description:
-      zh: "用于复杂记忆问题，例如比较、计数、多跳推理、广义总结或时间链问题。"
-      en: "Use for complex memory questions such as comparison, counting, multi-hop, broad summary, or temporal chaining."
+
+      zh: "用于复杂记忆问题（比较、计数、多跳、广义总结、时间链）。每次调用只处理一个复杂问题。"
+
+      en: "Complex memory questions (comparison, counting, multi-hop, broad summary, temporal). One question per call."
+
   reply_to_user:
+
     description:
-      zh: "向用户发送可见回复；message 为正文，finalize=true 表示本事务目标已达成。"
-      en: "Send the user-visible reply; set finalize=true when the transaction goal is complete."
+
+      zh: "向用户发送可见回复；message 为正文，finalize=true 表示本事务目标已达成。仅在确认用户请求已全部完成后使用。"
+
+      en: "Send the user-visible reply; finalize=true only when the full user request is complete."
+
   get_current_time:
+
     description:
+
       zh: "用于当前时间、日期、星期几，以及今天、昨天、明天这类依赖当前时间的问题。"
+
       en: "Use for current date/time, weekday, and relative-day questions such as today, yesterday, and tomorrow."
+
   schedule_manage:
     description:
-      zh: "用于创建、修改或取消日程/提醒，由日程领域代理内部路由到对应动作。"
-      en: "Use for creating, updating, or canceling schedules and reminders through the schedule domain agent."
+      zh: >
+        创建、修改或取消单条日程/提醒。每次调用只处理 1 条。instruction 须写清：
+        (1) 明确日期与时间（优先绝对时间，如 2026-05-30 08:00）；
+        (2) 到点要执行的具体动作/提醒内容（如「提醒我起床」「提醒我睡觉」），
+        不要只写抽象标签（如「第一条」「日程1」）或省略动作。
+        示例：「2026-05-30 08:00 提醒我起床」「2026-05-31 22:00 提醒我睡觉」。
+        禁止在一条 instruction 里打包整周或多个时间点。多条需求由思考层多轮各调一次。
+        返回 count=1 只表示本步；partial=true 表示批量任务未完成，须继续创建。
+      en: >
+        Create, update, or cancel exactly one schedule per call. instruction must include:
+        (1) an explicit date and time (prefer absolute, e.g. 2026-05-30 08:00);
+        (2) the concrete action or reminder at that time (e.g. "remind me to wake up",
+        "remind me to go to sleep")—not vague labels like "item 1" or "schedule A".
+        Examples: "2026-05-30 08:00 remind me to wake up", "2026-05-31 22:00 remind me to sleep".
+        Never pack a whole week or multiple times into one instruction. Multi-item work needs
+        multiple plan rounds. count=1 is one step only; partial=true means continue creating.
+
   schedule_query:
+
     description:
-      zh: "用于查看已有日程、即将到时的提醒，或按时间、关键词查询排期。"
-      en: "Use for listing and searching existing schedules, reminders, and upcoming plans."
+
+      zh: "查看已有日程、即将到时的提醒，或按时间/关键词查询。用于核实创建进度或回答「有什么安排」。"
+
+      en: "List or search schedules and reminders. Use to verify progress after creates or answer what is planned."
+
   email_ask:
+
     description:
+
       zh: "用于检索邮箱；keywords 为 Gmail 关键词（可留空则按 mail_scope 宽泛列出，如全部未读），mail_scope 为 unread 或 all。"
+
       en: "Search Gmail: optional keywords; leave empty to list by mail_scope only (e.g. all unread). mail_scope is unread or all."
+
   email_read:
+
     description:
+
       zh: "读取指定邮件全文；message_id/thread_id 必须从 email_ask 返回的 evidence_index 中原样复制 Gmail REST id，禁止编造或缩写。"
+
       en: "Read full email body; message_id/thread_id must be copied exactly from email_ask evidence_index (Gmail REST ids). Never invent or abbreviate."
+
   email_send:
+
     description:
-      zh: "用于发送邮件，支持收件人、主题和正文。"
-      en: "Use for sending an email with recipients, subject, and body."
+
+      zh: "用于发送单封邮件，支持收件人、主题和正文。一次调用只发一封。"
+
+      en: "Send one email with recipients, subject, and body. One message per call."
+

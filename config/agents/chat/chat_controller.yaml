@@ -23,8 +23,7 @@ systems:
 runtime:
   profile: legacy
   think_life:
-    max_delegates_per_transaction: 8
-    max_think_rounds: 16
+    # max_delegates_per_transaction / max_think_rounds: omit or null = unlimited
     scene_context_max_entries: 40
     scene_persist_jsonl: true
     scheduler:

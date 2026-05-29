@@ -19,12 +19,13 @@ behavioral parity tests in Phase 5 can compare like-for-like.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import yaml
 from langchain.agents import create_agent
@@ -115,7 +116,7 @@ class ExecutionAgent:
             for name in self.enabled_capability_names
         }
         # Pre-compute the capability boundary block for the thinking layer.
-        self._capability_block_cache = self._build_capability_block()
+        self._capability_block_cache = self._build_capability_block(tool_names=None)
 
     # ------------------------------------------------------------------
     # Public API exposed to the thinking layer
@@ -137,9 +138,18 @@ class ExecutionAgent:
             )
         return descriptors
 
-    def describe_capabilities_block(self) -> str:
+    def describe_capabilities_block(self, names: Optional[Sequence[str]] = None) -> str:
         """Return the human-readable capability list for prepending to thinking-layer prompts."""
-        return self._capability_block_cache
+        if not names:
+            return self._capability_block_cache
+        filtered = [
+            n
+            for n in names
+            if str(n or "").strip() and str(n).strip() in self.enabled_capability_names
+        ]
+        if not filtered:
+            return ""
+        return self._build_capability_block(tool_names=filtered)
 
     def execute(
         self,
@@ -165,11 +175,14 @@ class ExecutionAgent:
         if think_life_hooks:
             controller_state["think_life"] = dict(think_life_hooks)
 
+        enabled_for_invoke = self._enabled_names_for_request(request)
+        tool_defaults = self._tool_defaults_for_request(request, enabled_for_invoke)
+
         capability_context = ControllerCapabilityContext(
             active_thread_id=active_thread_id,
             recall_state=recall_state,
             controller_state=controller_state,
-            tool_defaults=self.tool_defaults,
+            tool_defaults=tool_defaults,
             logger=logger,
             email_agent_provider=self.email_agent_provider,
             schedule_agent_provider=self.schedule_agent_provider,
@@ -177,10 +190,14 @@ class ExecutionAgent:
         )
         tools = build_controller_tools(
             context=capability_context,
-            enabled_tool_names=self.enabled_capability_names,
+            enabled_tool_names=enabled_for_invoke,
             tool_descriptions=self.capability_descriptions,
             registry=self.registry,
         )
+        if not tools:
+            raise ValueError(
+                f"No tools available for execution request (allowed={request.allowed_tool_names!r})"
+            )
         system_prompt = self._build_execution_system_prompt(wm_entries=wm_entries)
         agent = create_agent(
             model=self.model_provider.model,
@@ -237,6 +254,157 @@ class ExecutionAgent:
 
         return execution_result
 
+    def invoke_tool_direct(
+        self,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        thread_id: str,
+        correlation_id: str = "",
+        think_life_hooks: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionResult:
+        """Think-life: invoke one capability without an execution-layer LLM."""
+        name = str(tool_name or "").strip()
+        if not name:
+            raise ValueError("tool_name must be a non-empty string")
+        active_thread_id = str(thread_id or "").strip()
+        if not active_thread_id:
+            raise ValueError("thread_id must be a non-empty string")
+        if name not in self.enabled_capability_names:
+            supported = ", ".join(self.enabled_capability_names)
+            raise ValueError(f"Unknown or disabled tool: {name}. Enabled: {supported}")
+
+        recall_state: Dict[str, Any] = {"mode": None, "result": None, "history": []}
+        controller_state: Dict[str, Any] = {"history": [], "call_seq": 0}
+        if think_life_hooks:
+            controller_state["think_life"] = dict(think_life_hooks)
+
+        tool_defaults = self._tool_defaults_for_request(
+            ExecutionRequest(
+                instruction="",
+                thread_id=active_thread_id,
+                allowed_tool_names=[name],
+            ),
+            [name],
+        )
+        capability_context = ControllerCapabilityContext(
+            active_thread_id=active_thread_id,
+            recall_state=recall_state,
+            controller_state=controller_state,
+            tool_defaults=tool_defaults,
+            logger=logger,
+            email_agent_provider=self.email_agent_provider,
+            schedule_agent_provider=self.schedule_agent_provider,
+            episodic_backend=self.episodic_backend,
+        )
+        tools = build_controller_tools(
+            context=capability_context,
+            enabled_tool_names=[name],
+            tool_descriptions=self.capability_descriptions,
+            registry=self.registry,
+        )
+        if not tools:
+            raise ValueError(f"Failed to build tool: {name}")
+
+        tool_obj = tools[0]
+        invoke_fn = getattr(tool_obj, "invoke", None) or getattr(tool_obj, "run", None)
+        if invoke_fn is None:
+            raise RuntimeError(f"Tool {name} has no invoke/run method")
+
+        payload = dict(tool_input or {})
+        try:
+            raw_result = invoke_fn(payload)
+        except Exception as exc:
+            logger.exception("invoke_tool_direct failed tool=%s", name)
+            controller_state.setdefault("history", []).append(
+                {
+                    "tool_name": name,
+                    "params": payload,
+                    "result": {"success": False, "error": str(exc)},
+                }
+            )
+            tool_history = list(controller_state.get("history", []) or [])
+            return ExecutionResult(
+                summary=f"tool={name}; success=false; error={exc}",
+                tool_history=tool_history,
+                success=False,
+                raw={"tool_name": name, "correlation_id": correlation_id},
+            )
+
+        tool_history = list(controller_state.get("history", []) or [])
+        summary = self._summary_from_tool_history(tool_history) or str(raw_result or "")
+
+        insufficient = False
+        limit_reached = False
+        for item in tool_history:
+            if not isinstance(item, dict):
+                continue
+            result = item.get("result")
+            if isinstance(result, dict):
+                if bool(result.get("limit_reached")):
+                    limit_reached = True
+                if bool(result.get("insufficient")):
+                    insufficient = True
+
+        return ExecutionResult(
+            summary=summary,
+            tool_history=tool_history,
+            success=True,
+            insufficient=insufficient,
+            limit_reached=limit_reached,
+            raw={
+                "recall_state": recall_state,
+                "tool_name": name,
+                "tool_input": payload,
+                "correlation_id": correlation_id,
+                "direct_invoke": True,
+            },
+        )
+
+    @staticmethod
+    def _summary_from_tool_history(tool_history: List[Dict[str, Any]]) -> str:
+        from m_agent.runtime.think_life.scheduler.execution_feedback import (
+            feedback_summary_from_tool_history,
+        )
+
+        return feedback_summary_from_tool_history(tool_history)
+
+    def _enabled_names_for_request(self, request: ExecutionRequest) -> List[str]:
+        allowed = request.allowed_tool_names
+        if not allowed:
+            return list(self.enabled_capability_names)
+        names: List[str] = []
+        for item in allowed:
+            name = str(item or "").strip()
+            if not name or name not in self.enabled_capability_names:
+                continue
+            if name not in names:
+                names.append(name)
+        if not names:
+            supported = ", ".join(self.enabled_capability_names)
+            raise ValueError(
+                f"allowed_tool_names {allowed!r} not in enabled capabilities: {supported}"
+            )
+        return names
+
+    def _tool_defaults_for_request(
+        self,
+        request: ExecutionRequest,
+        enabled_for_invoke: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not request.allowed_tool_names:
+            return self.tool_defaults
+        merged = copy.deepcopy(self.tool_defaults)
+        controller = dict(merged.get(_CONTROLLER_LIMIT_KEY) or {})
+        controller["max_calls_per_turn"] = 1
+        merged[_CONTROLLER_LIMIT_KEY] = controller
+        if len(enabled_for_invoke) == 1:
+            only = enabled_for_invoke[0]
+            per_tool = dict(merged.get(only) or {})
+            per_tool["max_calls_per_turn"] = 1
+            merged[only] = per_tool
+        return merged
+
     # ------------------------------------------------------------------
     # System-prompt assembly (no persona)
     # ------------------------------------------------------------------
@@ -270,15 +438,16 @@ class ExecutionAgent:
                 )
         return "\n\n".join(section for section in sections if section).strip()
 
-    def _build_capability_block(self) -> str:
-        if not self.enabled_capability_names:
+    def _build_capability_block(self, tool_names: Optional[Sequence[str]] = None) -> str:
+        names = list(tool_names) if tool_names is not None else list(self.enabled_capability_names)
+        if not names:
             return ""
         if self._capability_block_header_override:
             header = self._capability_block_header_override
         else:
             header = "[可用顶层工具]" if self.prompt_language == "zh" else "[Available Top-Level Tools]"
         lines = [header]
-        for name in self.enabled_capability_names:
+        for name in names:
             description = self.capability_descriptions.get(name, "") or f"Top-level tool: {name}"
             lines.append(f"- `{name}`: {description}")
         return "\n".join(lines)

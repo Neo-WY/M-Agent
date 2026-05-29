@@ -13,6 +13,12 @@ from m_agent.runtime.think_life.contracts import (
     StimulusKind,
     TransactionRecord,
 )
+from m_agent.runtime.think_life.scheduler.execution_feedback import (
+    build_feedback_user_message,
+    extract_last_tool_step,
+    feedback_summary_from_tool_history,
+    looks_like_multi_step_request,
+)
 from m_agent.systems.scene.protocols import SceneReader
 
 
@@ -70,9 +76,16 @@ def build_perception_for_stimulus(
         "scene_tail_text": format_scene_tail(scene_tail),
     }
     if stimulus.kind == StimulusKind.EXECUTION_FEEDBACK:
+        tool_history = stimulus.payload.get("tool_history")
+        structured_summary = feedback_summary_from_tool_history(tool_history)
+        last_step = extract_last_tool_step(tool_history)
         system_context["execution_feedback"] = {
             "delegate_id": stimulus.delegate_id,
-            "summary": stimulus.payload.get("summary", ""),
+            "summary": structured_summary or stimulus.payload.get("summary", ""),
+            "llm_summary": stimulus.payload.get("summary", ""),
+            "structured_summary": structured_summary,
+            "last_tool_step": last_step,
+            "multi_step_request": looks_like_multi_step_request(pending_user_request),
         }
         if pending_user_request:
             system_context["pending_user_request"] = pending_user_request
@@ -102,13 +115,9 @@ def _stimulus_user_message(
     if stimulus.kind == StimulusKind.HEARTBEAT:
         return str(stimulus.payload.get("text", "") or stimulus.payload.get("prompt", "") or "").strip()
     if stimulus.kind == StimulusKind.EXECUTION_FEEDBACK:
-        summary = str(stimulus.payload.get("summary", "") or "").strip()
-        pending = str(pending_user_request or "").strip()
-        parts = ["[Execution feedback] Tools finished for the current request."]
-        if pending:
-            parts.append(f"User request to address: {pending}")
-        if summary:
-            parts.append(f"Execution summary: {summary}")
-        parts.append("Plan the user-facing reply (use answer_directly).")
-        return " ".join(parts)
+        return build_feedback_user_message(
+            pending_user_request=pending_user_request,
+            tool_history=stimulus.payload.get("tool_history"),
+            llm_summary=str(stimulus.payload.get("summary", "") or "").strip(),
+        )
     return str(stimulus.payload.get("text", "") or "").strip() or "[stimulus]"

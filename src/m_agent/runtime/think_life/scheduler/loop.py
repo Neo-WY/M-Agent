@@ -14,15 +14,13 @@ from m_agent.api.chat_api_shared import _now_iso
 
 from m_agent.api.thread_runtime_status import THREAD_RUNTIME_STATUS
 
-from m_agent.layers.execution.contracts import ExecutionRequest
-
-from m_agent.layers.execution.core import ExecutionAgent
-
 from m_agent.layers.execution.errors import ExecutionCancelledError
 
-from m_agent.layers.thinking.core import ThinkingAgent
+from m_agent.layers.perception.contracts import PerceptionInput
 
-from m_agent.layers.thinking.state import ConversationStateRegistry
+from m_agent.layers.thinking.core import ThinkingAgent, ThinkingTurnResult
+
+from m_agent.layers.thinking.state import ConversationStateRegistry, ThinkingDecision
 
 from m_agent.runtime.think_life.config import ThinkLifeConfig
 
@@ -55,11 +53,22 @@ from m_agent.runtime.think_life.scheduler.cpu_state import THREAD_CPU_STATE
 
 from m_agent.runtime.think_life.scheduler.schedule_lifecycle import ScheduleLifecycleHook
 
+from m_agent.runtime.think_life.scheduler.delegate import plan_delegate
+
+from m_agent.runtime.think_life.scheduler.execution_feedback import (
+    augment_perception_with_nudge,
+    build_completion_nudge_message,
+    feedback_summary_from_tool_history,
+    premature_reply_block_reason,
+)
+
 from m_agent.runtime.think_life.scheduler.think_context import (
 
     ThinkContext,
 
     build_perception_for_stimulus,
+
+    latest_user_utterance_from_scene,
 
 )
 
@@ -82,6 +91,8 @@ ReplyCallback = Callable[[str, str, str, bool], None]
 ThinkingEventEmitter = Callable[[str, Dict[str, Any]], None]
 
 HistoryProvider = Callable[[str], Optional[List[Dict[str, Any]]]]
+
+_MAX_COMPLETION_GATE_NUDGES = 2
 
 class ThinkLifeLoop:
 
@@ -524,6 +535,54 @@ class ThinkLifeLoop:
 
         }
 
+    def _think_plan_with_gate(
+        self,
+        *,
+        record: TransactionRecord,
+        stimulus: Stimulus,
+        perception: PerceptionInput,
+        scene_tail: List[SceneEntry],
+    ) -> tuple[ThinkingTurnResult, ThinkingDecision]:
+        """Run plan; on premature answer_directly after feedback, nudge and replan."""
+        perception_plan = perception
+        turn: Optional[ThinkingTurnResult] = None
+        decision: Optional[ThinkingDecision] = None
+
+        for nudge_idx in range(_MAX_COMPLETION_GATE_NUDGES + 1):
+            turn = self.thinking_agent.handle(
+                perception_plan,
+                event_emitter=self._event_emitter,
+            )
+            decision = turn.decision
+
+            if decision.mode != "answer_directly":
+                break
+            if stimulus.kind != StimulusKind.EXECUTION_FEEDBACK:
+                break
+
+            pending = latest_user_utterance_from_scene(scene_tail)
+            block = premature_reply_block_reason(
+                pending_user_request=pending,
+                stimulus=stimulus,
+            )
+            if not block:
+                break
+            if nudge_idx >= _MAX_COMPLETION_GATE_NUDGES:
+                logger.warning(
+                    "completion gate exhausted for txn=%s block=%s; allowing answer_directly",
+                    record.transaction_id,
+                    block,
+                )
+                break
+
+            perception_plan = augment_perception_with_nudge(
+                perception,
+                build_completion_nudge_message(block),
+            )
+
+        assert turn is not None and decision is not None
+        return turn, decision
+
     def _run_transaction_turn(
 
         self,
@@ -552,7 +611,8 @@ class ThinkLifeLoop:
 
         record.think_rounds += 1
 
-        if record.think_rounds > self.config.max_think_rounds:
+        limit_rounds = self.config.max_think_rounds
+        if limit_rounds is not None and record.think_rounds > limit_rounds:
 
             self.registry.transition(record.transaction_id, TransactionStatus.FAILED)
 
@@ -580,17 +640,14 @@ class ThinkLifeLoop:
 
         ctx = ThinkContext(transaction=record, stimulus=stimulus, scene_tail=scene_tail)
 
-        turn = self.thinking_agent.handle(
-
-            perception,
-
-            event_emitter=self._event_emitter,
-
+        turn, decision = self._think_plan_with_gate(
+            record=record,
+            stimulus=stimulus,
+            perception=perception,
+            scene_tail=scene_tail,
         )
 
         self._sync_transaction_from_conversation_state(record)
-
-        decision = turn.decision
 
         if decision.reasoning:
 
@@ -630,66 +687,75 @@ class ThinkLifeLoop:
 
             return self._handle_preempt(stimulus, record, phase="think")
 
+        enabled_tools = self.execution_agent.enabled_capability_names
+
         if turn.execution_result is not None:
             answer = str(turn.answer or "").strip()
             if answer:
+                planned = plan_delegate(
+                    decision,
+                    enabled_tools=enabled_tools,
+                    for_user_reply=True,
+                    user_reply_text=answer,
+                )
+                if planned:
+                    tool_name, tool_input = planned
+                    return self._delegate_and_wait(
+                        record,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        perception=perception,
+                        stimulus=stimulus,
+                        cancel_event=cancel_event,
+                    )
+
+        if decision.mode == "execute":
+            planned = plan_delegate(decision, enabled_tools=enabled_tools)
+            if planned:
+                limit = self.config.max_delegates_per_transaction
+                if limit is not None and record.delegate_count >= limit:
+                    self.registry.transition(record.transaction_id, TransactionStatus.FAILED)
+                    return {
+                        "success": False,
+                        "error": "max_delegates_per_transaction exceeded",
+                        "transaction_id": record.transaction_id,
+                    }
+                tool_name, tool_input = planned
                 return self._delegate_and_wait(
                     record,
-                    f"Use the reply_to_user tool to send this message to the user (finalize=true): {answer}",
-                    perception,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    perception=perception,
                     stimulus=stimulus,
                     cancel_event=cancel_event,
                 )
-
-        if decision.mode == "execute" and str(decision.instruction or "").strip():
-
-            if record.delegate_count >= self.config.max_delegates_per_transaction:
-
-                self.registry.transition(record.transaction_id, TransactionStatus.FAILED)
-
-                return {
-
-                    "success": False,
-
-                    "error": "max_delegates_per_transaction exceeded",
-
-                    "transaction_id": record.transaction_id,
-
-                }
-
-            return self._delegate_and_wait(
-
-                record,
-
-                str(decision.instruction).strip(),
-
-                perception,
-
-                stimulus=stimulus,
-
-                cancel_event=cancel_event,
-
-            )
+            record.last_error = "execute mode requires tool_name (or a single capability_hint)"
+            self.registry.transition(record.transaction_id, TransactionStatus.FAILED)
+            return {
+                "success": False,
+                "error": record.last_error,
+                "transaction_id": record.transaction_id,
+            }
 
         if decision.mode == "answer_directly":
-
             answer = str(decision.answer or "").strip()
-
             if answer:
-
-                return self._delegate_and_wait(
-
-                    record,
-
-                    f"Use the reply_to_user tool to send this message to the user (finalize=true): {answer}",
-
-                    perception,
-
-                    stimulus=stimulus,
-
-                    cancel_event=cancel_event,
-
+                planned = plan_delegate(
+                    decision,
+                    enabled_tools=enabled_tools,
+                    for_user_reply=True,
+                    user_reply_text=answer,
                 )
+                if planned:
+                    tool_name, tool_input = planned
+                    return self._delegate_and_wait(
+                        record,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        perception=perception,
+                        stimulus=stimulus,
+                        cancel_event=cancel_event,
+                    )
 
         self._complete_transaction_after_turn(record)
         return {
@@ -720,11 +786,13 @@ class ThinkLifeLoop:
 
         record: TransactionRecord,
 
-        instruction: str,
+        *,
+
+        tool_name: str,
+
+        tool_input: Dict[str, Any],
 
         perception: Any,
-
-        *,
 
         stimulus: Stimulus,
 
@@ -764,36 +832,20 @@ class ThinkLifeLoop:
 
         try:
 
-            exec_result = self.execution_agent.execute(
+            if cancel_event is not None and cancel_event.is_set():
+                raise ExecutionCancelledError("execution preempted")
 
-                ExecutionRequest(
-
-                    instruction=instruction,
-
-                    thread_id=record.thread_id,
-
-                    correlation_id=delegate_id,
-
-                ),
-
-                wm_entries=list(record.wm_entries),
-
-                wm_writer_callback=None,
-
+            exec_result = self.execution_agent.invoke_tool_direct(
+                tool_name=tool_name,
+                tool_input=dict(tool_input or {}),
+                thread_id=record.thread_id,
+                correlation_id=delegate_id,
                 think_life_hooks={
-
                     "delegate_id": delegate_id,
-
                     "transaction_id": record.transaction_id,
-
                     "on_reply": on_reply,
-
                     "scene_writer": self.scene_writer,
-
                 },
-
-                cancel_event=cancel_event,
-
             )
 
         except ExecutionCancelledError:
@@ -826,7 +878,8 @@ class ThinkLifeLoop:
 
             tool_history=exec_result.tool_history,
 
-            summary=str(exec_result.summary or ""),
+            summary=feedback_summary_from_tool_history(exec_result.tool_history)
+            or str(exec_result.summary or ""),
 
         )
 

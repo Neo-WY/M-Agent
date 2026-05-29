@@ -19,10 +19,12 @@ class ThinkingDecision:
     """
 
     mode: str = "answer_directly"
+    tool_name: Optional[str] = None
     instruction: Optional[str] = None
     answer: Optional[str] = None
     episode_note: Optional[str] = None
     capability_hint: Optional[List[str]] = None
+    request_complete: Optional[bool] = None
     reasoning: Optional[str] = None
 
 

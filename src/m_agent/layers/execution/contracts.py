@@ -25,8 +25,12 @@ class CapabilityDescriptor:
 class ExecutionRequest:
     """A natural-language instruction the thinking layer issues to execution.
 
-    ``capability_hint`` is a soft hint (the execution layer is free to ignore
-    or route differently); ``correlation_id`` is used for log/event correlation.
+    ``allowed_tool_names`` restricts which LangChain tools are mounted for this
+    invocation (Think-life: exactly one name). When set, the execution layer
+    also enforces a single tool call per invoke via controller limits.
+
+    ``capability_hint`` is legacy/telemetry; prefer ``allowed_tool_names``.
+    ``correlation_id`` is used for log/event correlation.
     ``thread_id`` is required by some capabilities (e.g. schedule_manage) and
     by recall thread namespacing — it does not pollute the NL instruction.
     """
@@ -34,6 +38,7 @@ class ExecutionRequest:
     instruction: str
     thread_id: str
     correlation_id: str = ""
+    allowed_tool_names: Optional[List[str]] = None
     capability_hint: Optional[List[str]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 

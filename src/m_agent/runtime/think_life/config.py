@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 
 @dataclass
@@ -16,8 +16,8 @@ class ThinkLifeSchedulerConfig:
 
 @dataclass
 class ThinkLifeConfig:
-    max_delegates_per_transaction: int = 8
-    max_think_rounds: int = 16
+    max_delegates_per_transaction: Optional[int] = None
+    max_think_rounds: Optional[int] = None
     scene_context_max_entries: int = 40
     scene_persist_jsonl: bool = True
     scheduler: ThinkLifeSchedulerConfig = None  # type: ignore[assignment]
@@ -37,9 +37,23 @@ def load_think_life_config(raw: Mapping[str, Any] | None) -> ThinkLifeConfig:
         default_feedback_priority=int(sched_raw.get("default_feedback_priority", 20) or 20),
         default_heartbeat_priority=int(sched_raw.get("default_heartbeat_priority", 40) or 40),
     )
+    max_delegates_raw = data.get("max_delegates_per_transaction")
+    max_delegates: Optional[int]
+    if max_delegates_raw is None or max_delegates_raw == "":
+        max_delegates = None
+    else:
+        parsed = int(max_delegates_raw)
+        max_delegates = parsed if parsed > 0 else None
+    max_think_raw = data.get("max_think_rounds")
+    max_think: Optional[int]
+    if max_think_raw is None or max_think_raw == "":
+        max_think = None
+    else:
+        parsed_think = int(max_think_raw)
+        max_think = parsed_think if parsed_think > 0 else None
     return ThinkLifeConfig(
-        max_delegates_per_transaction=int(data.get("max_delegates_per_transaction", 8) or 8),
-        max_think_rounds=int(data.get("max_think_rounds", 16) or 16),
+        max_delegates_per_transaction=max_delegates,
+        max_think_rounds=max_think,
         scene_context_max_entries=int(data.get("scene_context_max_entries", 40) or 40),
         scene_persist_jsonl=bool(data.get("scene_persist_jsonl", True)),
         scheduler=scheduler,

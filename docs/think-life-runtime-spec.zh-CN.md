@@ -52,7 +52,11 @@
 
 ## Think 层（plan-only）
 
-启用 `runtime.profile: think_life` 时，`ThinkingAgent.max_executions_per_turn` 在运行时置为 `0`：Think **只规划**，不在 Think 内调用 ExecutionAgent。工具执行与 `reply_to_user` 均由 `ThinkLifeLoop._delegate_and_wait` 委托；工具结束后入队 `execution_feedback`，再 plan 一轮并定稿回复。`execution_feedback` 规划时从 Scene 取最近 user utterance 作为 `pending_user_request`。
+启用 `runtime.profile: think_life` 时，`ThinkingAgent.max_executions_per_turn` 在运行时置为 `0`：Think **只规划**。工具执行与 `reply_to_user` 均由 `ThinkLifeLoop._delegate_and_wait` 委托；**每次 delegate 仅调用一个** `tool_name`，经 **registry 直调**（`invoke_tool_direct`，无 execution-layer LLM）。工具结束后入队 `execution_feedback`，再 plan 下一轮。
+
+**execution_feedback 语义**：user 消息标明「仅完成一个 delegate 步骤」，优先注入 Structured tool result（`count`/`action`/`answer`/`partial`）。多步用户诉求下，若 `schedule_manage` 返回 `count=1` 或 `partial=true`，Loop 会 **completion gate** 拦截过早的 `answer_directly` 并 nudge 再 plan（最多 2 次）。plan 可选字段 `request_complete`：多步任务未完成时应为 false。
+
+`execution_feedback` 规划时从 Scene 取最近 user utterance 作为 `pending_user_request`。
 
 ## 配置
 

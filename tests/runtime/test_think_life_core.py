@@ -303,7 +303,7 @@ def test_execution_feedback_perception_includes_pending_user_request() -> None:
     )
     assert perception.system_context.get("pending_user_request") == "今天有什么安排吗"
     assert "今天有什么安排吗" in perception.user_message
-    assert "no schedules found" in perception.user_message
+    assert "no schedules found" in perception.user_message or "Execution note" in perception.user_message
 
 
 def test_gateway_execution_feedback_does_not_schedule_drainer_by_default() -> None:

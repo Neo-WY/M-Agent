@@ -296,6 +296,8 @@ class ThinkingAgent:
             "instruction": decision.instruction,
             "answer_excerpt": (str(decision.answer or "").strip()[:160] or None),
             "reasoning": decision.reasoning,
+            "tool_name": decision.tool_name,
+            "request_complete": decision.request_complete,
             "capability_hint": list(decision.capability_hint or []),
             "episode_note": decision.episode_note,
         }
@@ -451,10 +453,13 @@ class ThinkingAgent:
                 "- instruction: 当 mode==execute 时，写一条自然语言指令交给执行层；否则留空或填 null。\n"
                 "- answer: 当 mode==answer_directly 时直接给出最终回复；否则留空或填 null。\n"
                 "- episode_note: 可选；写下你认为以后值得记住的一两句话，不要把工具结果原样塞进去。\n"
-                "- capability_hint: 可选；只在确实需要时填入一个能力名列表。\n"
+                "- tool_name: 当 mode==execute 时必填，且只能填一个已启用能力名（本轮只执行这一个工具）。\n"
+                "- request_complete: 仅当用户原始请求已全部完成时填 true；否则 false 并继续 execute。\n"
+                "- capability_hint: 可选；已废弃，请优先使用 tool_name。\n"
                 "- reasoning: 可选；简要说明本轮选择 mode 的理由，便于审计。\n"
                 "[硬约束]\n"
-                "- 你本身没有工具权限，所有外部动作只能通过 execute 指令委托。\n"
+                "- 你本身没有工具权限，所有外部动作只能通过 execute 委托，且每轮最多一个 tool_name。\n"
+                "- 多步任务：以 feedback 中 Structured tool result 的 count 为准；未完成时 request_complete=false。\n"
                 "- 当 mode==execute 时，不要在 answer 中给出最终回复，让执行层先工作。\n"
                 "- 闲聊、致谢、与可委托能力无关的请求，直接 answer_directly。\n"
                 "- 不要在指令中重复用户原话，要写明你希望执行层做什么。"
@@ -466,10 +471,13 @@ class ThinkingAgent:
             "- instruction: required when mode==execute; a single natural-language directive for the execution layer.\n"
             "- answer: required when mode==answer_directly; the final user-facing reply.\n"
             "- episode_note: optional short text worth remembering; do not dump raw tool output here.\n"
-            "- capability_hint: optional list of capability names to suggest.\n"
+            "- tool_name: required when mode==execute; exactly one enabled capability (one tool this round).\n"
+            "- request_complete: true only when the original user request is fully done; else false and continue execute.\n"
+            "- capability_hint: optional legacy field; prefer tool_name.\n"
             "- reasoning: optional short rationale for the chosen mode (for auditing).\n"
             "[Hard Constraints]\n"
-            "- You hold no tools yourself; all external actions must be delegated via execute.\n"
+            "- You hold no tools yourself; delegate via execute with at most one tool_name per round.\n"
+            "- Multi-step tasks: trust Structured tool result count on feedback; request_complete=false until done.\n"
             "- When mode==execute, leave answer empty and let the execution layer work first.\n"
             "- For small talk, acknowledgements, or requests unrelated to delegable capabilities, choose answer_directly.\n"
             "- Don't echo the user; in the instruction state explicitly what you want the execution layer to do."
@@ -479,6 +487,18 @@ class ThinkingAgent:
     # Execution call
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _allowed_tools_for_decision(decision: ThinkingDecision) -> Optional[List[str]]:
+        name = str(decision.tool_name or "").strip()
+        if name:
+            return [name]
+        hints = decision.capability_hint or []
+        if isinstance(hints, list) and len(hints) == 1:
+            only = str(hints[0] or "").strip()
+            if only:
+                return [only]
+        return None
+
     def _execute(
         self,
         *,
@@ -486,10 +506,12 @@ class ThinkingAgent:
         perception: PerceptionInput,
         state: ConversationState,
     ) -> ExecutionResult:
+        allowed = self._allowed_tools_for_decision(decision)
         request = ExecutionRequest(
             instruction=str(decision.instruction or "").strip(),
             thread_id=perception.thread_id,
             correlation_id=uuid4().hex,
+            allowed_tool_names=allowed,
             capability_hint=list(decision.capability_hint or []) or None,
         )
 
@@ -657,19 +679,23 @@ class ThinkingAgent:
         if isinstance(raw, dict):
             return ThinkingDecision(
                 mode=str(raw.get("mode", "answer_directly") or "answer_directly"),
+                tool_name=raw.get("tool_name"),
                 instruction=raw.get("instruction"),
                 answer=raw.get("answer"),
                 episode_note=raw.get("episode_note"),
                 capability_hint=list(raw["capability_hint"]) if isinstance(raw.get("capability_hint"), list) else None,
+                request_complete=raw.get("request_complete"),
                 reasoning=raw.get("reasoning"),
             )
         if hasattr(raw, "mode"):
             return ThinkingDecision(
                 mode=str(getattr(raw, "mode", "answer_directly") or "answer_directly"),
+                tool_name=getattr(raw, "tool_name", None),
                 instruction=getattr(raw, "instruction", None),
                 answer=getattr(raw, "answer", None),
                 episode_note=getattr(raw, "episode_note", None),
                 capability_hint=getattr(raw, "capability_hint", None),
+                request_complete=getattr(raw, "request_complete", None),
                 reasoning=getattr(raw, "reasoning", None),
             )
         # Fallback: treat as direct answer string.
